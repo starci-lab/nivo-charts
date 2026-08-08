@@ -16,3 +16,9 @@
 *.tpl text eol=lf
 *.md text eol=lf
 .helmignore text eol=lf
+
+# GitHub Pages reads public/CNAME as the custom domain, and it has no
+# extension for the rules above to match. A trailing CR turns the hostname
+# into `charts.nivo.vn\r`, which Pages accepts and then answers 404 on -- the
+# repository settings page still displays the domain as configured.
+CNAME text eol=lf
