@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: MIT
+apiVersion: v2
+name: agentos
+description: >-
+  One AgentOS instance — the customer's OpenClaw agent plus n8n, with the
+  controlplane as the single listening component. One Helm release per
+  customer (biz.md section 1). The app pod is a single Deployment
+  (controlplane + openclaw + n8n + mcp); postgresql, minio and qdrant are
+  separate stateful workloads pulled in as subcharts below.
+type: application
+home: N/A
+icon: https://r2.kanibot.xyz/kani.png
+keywords:
+  - agentos
+  - nivo
+  - openclaw
+maintainers:
+  - name: starci183
+    url: "https://x.com/0xstacynguyen"
+annotations:
+  category: Application
+  licenses: MIT
+
+# THE CHART AND THE IMAGES IT DEPLOYS ARE VERSIONED SEPARATELY, ON PURPOSE.
+#
+# `version` is this chart's own shape. `appVersion` is the agentos-controlplane
+# / agentos-cli pair, which biz.md section 5 ships "as ONE version, from one
+# tag" because they share the instance database schema — a Job running an old
+# CLI against a newer schema corrupts data silently while the build stays
+# green.
+#
+# The BACKEND does not share either number. During a fleet upgrade (section 8)
+# instances deliberately run older code while the backend runs new; that is
+# the normal state for hours, which is why `instances.chart_version` and
+# `instances.image_versions` are tracked per instance rather than assumed
+# equal.
+version: 0.1.0
+appVersion: "0.1.0"
+
+# Every dependency version is a TILDE RANGE PINNED AT THE PATCH LEVEL
+# (`~X.Y.0`), never a bare `X.x.x`. Bitnami's chart moves while the
+# `bitnamilegacy` images it now defaults away from stay frozen — a floating
+# minor lets Postgres change major version on a pod restart with nobody having
+# touched a file, and it makes biz.md section 8's `image_versions` tracking
+# meaningless: "which instances run what" stops being answerable. `helm
+# dependency update` re-resolves inside the pinned range only; bumping the
+# range itself is a deliberate, reviewed commit.
+dependencies:
+  - name: postgresql
+    version: "~18.8.0"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+  - name: minio
+    version: "~17.0.0"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: minio.enabled
+  - name: qdrant
+    # The OFFICIAL qdrant chart (qdrant/qdrant), not a Bitnami wrapper —
+    # biz.md section 8 requires the same Qdrant version centrally and in the
+    # chart, because a snapshot restore (the knowledge-sync path) is tied to
+    # the server version. Pin here, pin the same number in the backend's
+    # snapshot builder, and treat a bump as a two-sided change.
+    version: "~1.18.0"
+    repository: https://qdrant.github.io/qdrant-helm
+    condition: qdrant.enabled

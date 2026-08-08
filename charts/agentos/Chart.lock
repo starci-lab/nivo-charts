@@ -1,0 +1,12 @@
+dependencies:
+- name: postgresql
+  repository: oci://registry-1.docker.io/bitnamicharts
+  version: 18.8.6
+- name: minio
+  repository: oci://registry-1.docker.io/bitnamicharts
+  version: 17.0.21
+- name: qdrant
+  repository: https://qdrant.github.io/qdrant-helm
+  version: 1.18.2
+digest: sha256:6e95a59bdef60941fda44c546c37c37fd68897624f5227c772b96af312ee9528
+generated: "2026-08-08T20:32:09.7144213+07:00"

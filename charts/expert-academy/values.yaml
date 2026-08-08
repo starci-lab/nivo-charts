@@ -1,0 +1,192 @@
+# Expert Academy — one instance, one release.
+#
+# NOTHING SECRET BELONGS IN THIS FILE — see charts/agentos/values.yaml's
+# header comment; the same rule and the same generated-secret pattern
+# (Bitnami auto-generates into `<release-name>-postgresql` when `auth.*` is
+# left blank below) applies here verbatim.
+#
+# biz.md section 9, item 2 is OPEN: whether the academy adopts the AgentOS
+# §5 shape (a controlplane as the one door, `nivo-cli`-style jobs, an
+# admission-pinned job image) or keeps its own existing deployment path is
+# an explicit unanswered question — "two provisioning stories inside one
+# product is the thing worth avoiding" is stated, not resolved. This chart
+# therefore ships the parts biz.md section 6 DOES commit to (one app pod,
+# no OpenClaw, no n8n, postgresql + qdrant) and leaves the AgentOS-shaped
+# knobs (`provision.*`, `rbac.*`) present but OFF, so a later decision to
+# converge the two products is a flip, not a rewrite. Flag this file for a
+# revisit once that question closes.
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Identity of this instance — mirrors charts/agentos's `instance.*` shape
+# (biz.md section 1: "one instance = one Helm release" is true of both
+# products). `baseDomain` differs from agentos's default because biz.md
+# section 6 mentions host-based routing (`expert-site-by-host`) without
+# fixing a literal domain string — treat this default as a placeholder for
+# whoever wires real DNS, not a locked value.
+instance:
+  id: ""
+  name: ""
+  baseDomain: academy.nivo.vn
+
+image:
+  # Set `pullPolicy: Never` for a kind/k3s cluster the images were
+  # side-loaded into — see charts/agentos/values.yaml for why.
+  pullPolicy: IfNotPresent
+  api:
+    repository: nivo/expert-academy-api
+    tag: "0.1.0"
+  web:
+    repository: nivo/expert-academy-web
+    tag: "0.1.0"
+
+# The single app pod: `api` (GraphQL, apps/expert-academy-api) + `web` (the
+# public course site). Unlike AgentOS's controlplane pod, NEITHER container
+# holds session/channel state that a second replica would double-handle, so
+# `replicas` is a real knob here rather than a hardcoded 1 — default kept at
+# 1 anyway to match every other instance's per-release cost model (biz.md
+# section 2: RAM is a per-instance meter) until there is a reason to scale
+# one instance out.
+appPod:
+  replicas: 1
+  api:
+    port: 4000
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+  web:
+    port: 3000
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+
+# Both containers are public on purpose — unlike AgentOS there is no
+# webhook-vs-command split to wall apart (biz.md section 5 is an AgentOS-only
+# constraint), so one Ingress with two path-routed backends is enough.
+ingress:
+  enabled: true
+  className: nginx
+  # Falls back to `<instance.name>.<instance.baseDomain>` when blank — see
+  # `expert-academy.hostname` in _helpers.tpl.
+  host: ""
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+  api:
+    path: /graphql
+    pathType: Prefix
+  web:
+    path: /
+    pathType: Prefix
+
+# OFF by default — see the header comment. Present so that if biz.md section
+# 9's open question resolves toward "yes, adopt the §5 shape", the knob
+# already exists and every instance's values carry it consistently instead
+# of seven different people inventing seven different flags for it.
+provision:
+  enabled: false
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+
+backup:
+  enabled: false
+  schedule: "0 3 * * *"
+
+rbac:
+  create: false
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# --- Wipe gate: do stores lose their data when this release is removed? ----
+# See charts/agentos/values.yaml's comment above its own `persistence:` block
+# for the full reasoning (biz.md section 8's BACKUP -> VERIFY -> DESTROY
+# gate) and for exactly how each store below wires it. DEFAULT MUST STAY
+# false for the same reason: a customer release never sets this true, only
+# dev/e2e teardown does. This chart has no `minio:` block (see the note at
+# the bottom of this file), so only the postgresql and qdrant bullets apply.
+persistence:
+  deleteOnUninstall: false
+
+# --- Stores: subcharts, each its own workload -------------------------------
+# See charts/agentos/values.yaml's comment above its own `postgresql:` block
+# for why these are StatefulSet-backed subcharts rather than hand-rolled
+# workloads in this chart.
+
+postgresql:
+  enabled: true
+  auth:
+    # Left BLANK on purpose — see charts/agentos/values.yaml.
+    database: expert_academy
+    username: expert_academy
+    password: ""
+    postgresPassword: ""
+  primary:
+    persistence:
+      size: 8Gi
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 1Gi }
+    # Wipe gate — see top-level `persistence.deleteOnUninstall` and
+    # charts/agentos/values.yaml's matching block for the full reasoning.
+    # Flip `enabled: true` AND `whenDeleted: Delete` together to opt in;
+    # `whenScaled` stays `Retain` always.
+    persistentVolumeClaimRetentionPolicy:
+      enabled: false
+      whenScaled: Retain
+      whenDeleted: Retain
+  # THE FROZEN, CONFIRMED-TO-EXIST TAG — same reasoning and same tag as
+  # charts/agentos/values.yaml, kept identical deliberately so the two
+  # products' Postgres never drift apart for no reason.
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
+    tag: "17.6.0-debian-12-r4"
+  volumePermissions:
+    enabled: false
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
+      tag: "12-debian-12-r51"
+  metrics:
+    enabled: false
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/postgres-exporter
+      tag: "0.17.1-debian-12-r16"
+
+qdrant:
+  enabled: true
+  # Single node — one expert's own RAG collection over their own uploaded
+  # resources (biz.md section 4: "a hard boundary, never a filter" between
+  # experts), not a shared cluster.
+  replicaCount: 1
+  persistence:
+    size: 8Gi
+    # No wipe-gate knob here — see charts/agentos/values.yaml's qdrant bullet
+    # under `persistence.deleteOnUninstall`: qdrant-helm 1.18.2 does not
+    # template `persistentVolumeClaimRetentionPolicy` at all, so this PVC is
+    # already never touched by `helm uninstall` with zero configuration.
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 2Gi }
+  # Blank — falls through to `appVersion`, itself fixed by the dependency
+  # pin in Chart.yaml. See charts/agentos/values.yaml for why.
+  image:
+    tag: ""
+
+# Object storage (course video/attachment uploads, biz.md section 6's
+# `media-asset` / `lesson-attachment`) is deliberately NOT a subchart here.
+# Whether the academy gets its own per-instance MinIO (AgentOS's shape) or
+# keeps using shared/central storage is downstream of the same section 9
+# open question as `provision.*` above — do not add a `minio:` block to this
+# chart until that is answered; it would be a second invented shape.

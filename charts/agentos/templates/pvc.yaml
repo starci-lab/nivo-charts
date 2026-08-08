@@ -1,0 +1,44 @@
+# STATE the app pod must not lose on a plain restart -- biz.md section 8's
+# recovery ladder, rung 1: "Restart: delete the pod; the Deployment
+# recreates it; data: untouched." n8n's own workflow/execution database and
+# OpenClaw's generated config (its gateway token, paired-device records,
+# session bookkeeping under `$OPENCLAW_CONFIG_DIR`) live nowhere else --
+# unlike the controlplane container, which persists through the postgresql
+# subchart and through its own k8s Secret (`NIVO_IDENTITY_SECRET_NAME` in
+# deployment.yaml). Without this PVC, a node drain or an OOM would silently
+# reset n8n's automation history and log OpenClaw's channels out.
+#
+# ONE PVC, not a StatefulSet `volumeClaimTemplate`: this app pod is a
+# Deployment with a hardcoded `replicas: 1` (deployment.yaml), so there is
+# never more than one consumer, and a plain PVC + ReadWriteOnce is exactly
+# the shape that fits -- `volumeClaimTemplate` is StatefulSet-only syntax
+# and would not apply here.
+#
+# THIS KNOB (`appPod.persistence`) DOES NOT EXIST IN values.yaml YET -- see
+# this chart's top-level `notes` for the flag to whoever owns that file.
+# `dig` supplies safe inline defaults (enabled, 2Gi) so this template does
+# not error against the unmodified scaffold.
+{{- /*
+`dig` needs a plain `map[string]interface{}` -- `.Values` itself is the
+distinct `chartutil.Values` type, which `dig` rejects outright (it fails
+"interface conversion", not merely returning the default) if handed to it
+directly. Round-tripping through YAML is the standard workaround.
+*/}}
+{{- $vals := .Values | toYaml | fromYaml }}
+{{- if dig "appPod" "persistence" "enabled" true $vals }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "agentos.fullname" . }}-state
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.global.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ dig "appPod" "persistence" "size" "2Gi" $vals }}
+{{- end }}

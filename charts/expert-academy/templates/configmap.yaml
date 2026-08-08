@@ -1,0 +1,28 @@
+# Descriptive-only "what is this release" metadata, readable straight off the
+# cluster with `kubectl get configmap` -- biz.md section 8: "know what each
+# instance runs" (`chart_version` plus per-image versions) is otherwise only
+# answerable from backend's `instances` row, which a node inside the cluster
+# (or an operator doing rung-1/2 recovery, section 8's ladder) cannot always
+# reach.
+#
+# This is DELIBERATELY NOT app runtime config: templates/deployment.yaml (a
+# separate slice) already wires every value api/web actually read
+# (POSTGRES_*, QDRANT_URL, EXPERT_INSTANCE_ID, EXPERT_API_URL) directly as
+# container env, computed from the same values.yaml knobs this file also
+# reads. Mirroring any of that here would just be a second, driftable copy
+# of the same fact with no consumer forced to agree with it. Nothing below
+# is secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "expert-academy.fullname" . }}-release-info
+  labels:
+    {{- include "expert-academy.labels" . | nindent 4 }}
+data:
+  chartVersion: {{ .Chart.Version | quote }}
+  appVersion: {{ .Chart.AppVersion | quote }}
+  apiImageTag: {{ .Values.image.api.tag | quote }}
+  webImageTag: {{ .Values.image.web.tag | quote }}
+  instanceId: {{ .Values.instance.id | quote }}
+  instanceName: {{ .Values.instance.name | quote }}
+  hostname: {{ include "expert-academy.hostname" . | quote }}

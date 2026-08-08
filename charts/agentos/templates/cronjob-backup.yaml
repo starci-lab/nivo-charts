@@ -1,0 +1,142 @@
+# `agentos-cli backup` as a CronJob -- the SAME command the recovery ladder's
+# rung 3/4 runs by hand for a Rebuild or a Wipe (biz.md section 8, "Wipe --
+# backup, verify, THEN destroy", step 3: "the same command the CronJob
+# already runs").
+#
+# Off by default (`backup.enabled: false` in values.yaml) -- turning it on is
+# a per-instance decision made at provision time, not a chart default.
+#
+# `concurrencyPolicy: Forbid`: `BackupRunnerService.run` (apps/agentos-cli/src
+# /backup/backup-runner.service.ts) writes a timestamped, never-overwritten
+# key and is safe to retry, but two overlapping runs would both scroll the
+# same Qdrant collection and query the same instance database at once for no
+# benefit -- there is nothing to gain from a second run starting before the
+# first finishes, only doubled load on stores this pod otherwise needs for
+# live traffic.
+#
+# WHAT THIS EXPORTS TODAY, PER THE CODE, NOT PER biz.md'S FULL SCOPE:
+# `BackupRunnerService`'s own header names two things biz.md's backup table
+# calls "irreplaceable" that are NOT YET ported here -- the customer's own
+# MinIO objects, and OpenClaw's config volume (which only the OpenClaw
+# container can mount). This CronJob still runs the command biz.md specifies;
+# the gap is inside `nivo-cli backup` itself, not in how this chart invokes
+# it, and is named again in this task's `notes` rather than silently
+# widened into a mount this chart would have to guess the shape of.
+{{- if .Values.backup.enabled }}
+{{- $s3 := .Values.backup.s3 | default dict }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "agentos.fullname" . }}-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            {{- include "agentos.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          {{- with .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: backup
+              image: {{ include "agentos.cliImage" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              # EXPLICIT `command` -- same reason as the provision hook Job
+              # (job-provision.yaml): the image's inherited
+              # `docker-entrypoint.sh` only skips prepending `node` when
+              # argv[0] is already a recognised system command, so
+              # `args: ["backup"]` alone execs `node backup` and crashes with
+              # MODULE_NOT_FOUND. Verified by actually installing this chart.
+              command: ["node", "dist/apps/agentos-cli/src/main.js"]
+              args: ["backup"]
+              env:
+                - name: NIVO_POD_ID
+                  value: {{ .Values.instance.id | quote }}
+                - name: NIVO_IMAGE_VERSION
+                  value: {{ .Chart.AppVersion | quote }}
+
+                # -- the instance database, same derivation as the
+                # provision hook Job (job-provision.yaml) --------------
+                - name: DB_HOST
+                  value: {{ printf "%s-postgresql" .Release.Name | quote }}
+                - name: DB_PORT
+                  value: "5432"
+                - name: DB_NAME
+                  value: {{ .Values.postgresql.auth.database | quote }}
+                - name: DB_USER
+                  value: {{ .Values.postgresql.auth.username | quote }}
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ printf "%s-postgresql" .Release.Name }}
+                      key: password
+
+                # -- this instance's own Qdrant, read-only scroll -------
+                - name: QDRANT_URL
+                  value: {{ printf "http://%s-qdrant:6333" .Release.Name | quote }}
+                - name: QDRANT_COLLECTION
+                  value: "knowledge"
+
+                # -- the SHARED, EXTERNAL S3/MinIO backup destination ---
+                # NOT the customer's own MinIO subchart in this same
+                # release -- BackupRunnerService's own header says
+                # "exports ... to the shared, external S3/MinIO" using a
+                # one-bucket-many-pods `pods/<podId>/` prefix, meaning this
+                # is a bucket nivo owns across every instance, the same
+                # shape as the controlplane's `webhook.metaAppSecret`
+                # (baked into every instance, never per-customer).
+                #
+                # GAP, NAMED RATHER THAN GUESSED: `backup.s3` is not yet a
+                # knob in values.yaml (see this task's `notes` for the
+                # proposed addition). Referenced here through
+                # `default dict` so this template renders safely today --
+                # every var below is empty until that knob exists, which
+                # means a `backup.enabled: true` install without it fails
+                # LOUDLY inside `nivo-cli backup` with
+                # `BackupNotConfiguredException` (`isS3Configured()` is
+                # false) rather than silently producing an empty backup.
+                # That fail-loud path is BackupRunnerService's own designed
+                # behaviour, not a defect in this template.
+                - name: S3_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3.existingSecretName | default (printf "%s-backup-s3" (include "agentos.fullname" .)) | quote }}
+                      key: endpoint
+                      optional: true
+                - name: S3_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3.existingSecretName | default (printf "%s-backup-s3" (include "agentos.fullname" .)) | quote }}
+                      key: bucket
+                      optional: true
+                - name: S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3.existingSecretName | default (printf "%s-backup-s3" (include "agentos.fullname" .)) | quote }}
+                      key: accessKey
+                      optional: true
+                - name: S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3.existingSecretName | default (printf "%s-backup-s3" (include "agentos.fullname" .)) | quote }}
+                      key: secretKey
+                      optional: true
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { cpu: 500m, memory: 512Mi }
+{{- end }}

@@ -1,0 +1,396 @@
+{{/*
+Compose an image reference honouring `global.imageRegistry`, the same
+convention the Bitnami/qdrant subcharts apply to themselves via their own
+`common.images.image` helper -- this chart has no equivalent for its OWN
+four images, so it gets one here rather than repeating the `if` four times.
+Call as `include "agentos.appImage" (dict "root" $ "img" .Values.image.X)` --
+NOT `include "agentos.appImage" .Values.image.X` alone, because `$` inside a
+`define` block is rebound to whatever was passed to it, not to this file's
+root context; wrapping both in one dict is what keeps `global.imageRegistry`
+reachable.
+*/}}
+{{- define "agentos.appImage" -}}
+{{- if .root.Values.global.imageRegistry -}}
+{{- printf "%s/%s:%s" .root.Values.global.imageRegistry .img.repository .img.tag -}}
+{{- else -}}
+{{- printf "%s:%s" .img.repository .img.tag -}}
+{{- end -}}
+{{- end }}
+
+# AgentOS app pod -- ONE Deployment, four containers sharing one network
+# namespace and, via the `state` PVC below, part of one filesystem (biz.md
+# section 5: "They share `localhost` and share fate -- which is why the
+# controlplane belongs IN this pod: if it dies, OpenClaw was down anyway, so
+# it adds no failure domain to the money path").
+#
+# `replicas: 1` is HARDCODED, not read from a value -- values.yaml's own
+# `appPod` header explains why there is deliberately no such field to raise:
+# this is a Deployment (rather than a bare Pod) purely so a lost node
+# reschedules it, never for horizontal scale. OpenClaw holds channel
+# sessions a second replica would double-handle, and n8n in default mode
+# double-fires every schedule with two mains (biz.md section 8, "Scaling").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agentos.fullname" . }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, never RollingUpdate: a rolling update briefly runs an OLD and
+    # a NEW Pod of this Deployment together, which for one instant is a
+    # second OpenClaw process holding the same channel sessions and a second
+    # n8n main firing the same schedules -- exactly what the fixed
+    # `replicas: 1` above exists to prevent. Recreate pays for that safety
+    # with a few seconds of downtime per rollout, which is the honest cost
+    # biz.md section 8's "Fleet upgrade" already prices in ("an upgrade
+    # restarts the pod, and a restart is silence on the customer's sales
+    # channel").
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "agentos.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentos.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "agentos.serviceAccountName" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # 1000 is the conventional non-root uid/gid both the n8n and OpenClaw
+      # images run as (their own home directories are `/home/node/...` --
+      # see the volumeMounts below); this makes the `state` PVC writable by
+      # both without either container running as root.
+      securityContext:
+        fsGroup: 1000
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "agentos.fullname" . }}-state
+      containers:
+        # ---------------------------------------------------------------
+        # controlplane -- the only listener, the only container with a
+        # Service, the only one with a readinessProbe (see its comment
+        # below for why that is deliberate, not an oversight).
+        # ---------------------------------------------------------------
+        - name: controlplane
+          image: {{ include "agentos.appImage" (dict "root" $ "img" .Values.image.controlplane) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: controlplane
+              containerPort: {{ .Values.appPod.controlplane.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.appPod.controlplane.port | quote }}
+            # Compared against the provision marker's `imageVersion` at
+            # startup (biz.md section 8) -- sourced from `Chart.appVersion`
+            # because Chart.yaml documents that field as exactly this pair's
+            # shared version, never the chart's own `version`.
+            - name: NIVO_IMAGE_VERSION
+              value: {{ .Chart.AppVersion | quote }}
+            - name: NIVO_HOSTNAME
+              value: {{ include "agentos.hostname" . | quote }}
+            - name: NIVO_BACKEND_URL
+              value: {{ .Values.bootstrap.backendUrl | quote }}
+            # THE ONE CREDENTIAL THIS CHART CARRIES. Single-use, buys exactly
+            # one `registerKey(publicKey)` call (biz.md section 8) and is
+            # supplied at install time via `--set bootstrap.token=...` --
+            # never committed to a values file, per this chart's top-level
+            # "NO SECRET GOES IN A CHART OR ITS VALUES" rule.
+            - name: NIVO_BOOTSTRAP_TOKEN
+              value: {{ .Values.bootstrap.token | quote }}
+            # The k8s Secret this pod GENERATES INTO on first boot and reads
+            # from thereafter (its own key pair, biz.md section 8; the
+            # channel-credential envelope data key, section 7). Scoped by
+            # release name so two instances in the same namespace -- should
+            # that ever happen -- can never collide; the app's own default
+            # (`controlplane-identity`) assumes a namespace-per-instance
+            # model and is overridden here for that reason.
+            - name: NIVO_IDENTITY_SECRET_NAME
+              value: {{ printf "%s-identity" (include "agentos.fullname" .) | quote }}
+            # Keeps the image the controlplane spawns index-pending /
+            # sync-knowledge Jobs with IN SYNC with the image this chart
+            # itself pins -- the admission policy that pins the allowed Job
+            # image (biz.md section 5 rule 4) is a cluster-level object
+            # outside this chart, but at least the two can never drift apart
+            # from a values edit alone.
+            - name: NIVO_CLI_IMAGE
+              value: {{ include "agentos.cliImage" . | quote }}
+            # THE BRIDGE. Controlplane re-exports this connection to the
+            # browser as Socket.IO, but THIS leg -- pod-internal, to OpenClaw
+            # -- is a RAW WebSocket, never Socket.IO. Measured against a live
+            # pod (docs/OPENCLAW-GATEWAY-PROTOCOL.md): `GET
+            # /socket.io/?EIO=4&transport=polling` against the OpenClaw side
+            # returns the Control UI's own SPA HTML, byte-identical to `GET
+            # /` -- not an engine.io handshake. `socket.io-client` cannot
+            # speak to this.
+            #
+            # `127.0.0.1`, NEVER the OpenClaw container's Service DNS (it has
+            # none -- see service.yaml), and this is load-bearing, not a
+            # style choice: the gateway grants operator scope by CONNECTION
+            # LOCALITY. A same-pod loopback peer authenticating with the
+            # shared gateway token is treated as local and gets the scopes it
+            # declares; the identical bytes arriving over the cluster network
+            # instead are treated as remote and have every declared scope
+            # wiped to `[]`. Do not "fix" either half of this to use
+            # Socket.IO, and do not "fix" this URL to the Service name -- both
+            # break the connection outright, the second one silently (it
+            # still connects, it just can never call anything gated above
+            # `operator.read`... actually gets nothing, scopes clear to
+            # empty).
+            - name: OPENCLAW_GATEWAY_URL
+              value: "ws://127.0.0.1:18789"
+            - name: OPENCLAW_ENABLED
+              value: {{ .Values.appPod.openclaw.enabled | quote }}
+            - name: N8N_URL
+              value: {{ printf "http://127.0.0.1:%d" (int .Values.appPod.n8n.port) | quote }}
+            - name: MCP_URL
+              value: {{ printf "http://127.0.0.1:%d" (int .Values.appPod.mcp.port) | quote }}
+            # --- stores: hostnames follow the subcharts' own default
+            # fullname convention (`<release-name>-<chart-name>`), which
+            # holds as long as nobody sets a `nameOverride`/`fullnameOverride`
+            # on the postgresql/minio/qdrant blocks below -- values.yaml does
+            # not set either today. Ports and secret key names are read off
+            # the vendored chart archives directly (`postgresql-18.8.6.tgz` /
+            # `minio-17.0.21.tgz`), not guessed: postgresql's own default
+            # service port is 5432 and its generated Secret carries the
+            # custom user's password under key `password`; minio's API port
+            # defaults to 9000 and its Secret carries `root-password`.
+            # Neither port is overridden anywhere in this chart's
+            # values.yaml, but nothing enforces that they stay in sync if
+            # someone later does -- see this chart's `notes`.
+            - name: DB_HOST
+              value: {{ printf "%s-postgresql" .Release.Name | quote }}
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: DB_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-postgresql" .Release.Name }}
+                  key: password
+            - name: MINIO_ENDPOINT
+              value: {{ printf "%s-minio" .Release.Name | quote }}
+            - name: MINIO_PORT
+              value: "9000"
+            - name: MINIO_USE_SSL
+              value: "false"
+            - name: MINIO_ROOT_USER
+              value: {{ .Values.minio.auth.rootUser | quote }}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-minio" .Release.Name }}
+                  key: root-password
+            # No API key: this chart's `qdrant.apiKey` is unset by default
+            # (values.yaml leaves it commented out), which matches Qdrant
+            # never being reachable outside this pod's own namespace in the
+            # first place. If `qdrant.apiKey` is ever turned on, this needs a
+            # matching `QDRANT_API_KEY` secretKeyRef against the key the
+            # official chart's own `templates/secret.yaml` writes.
+            - name: QDRANT_URL
+              value: {{ printf "http://%s-qdrant:6333" .Release.Name | quote }}
+            {{- /* see pvc.yaml's header comment on why `dig` needs this round-trip */}}
+            {{- $vals := .Values | toYaml | fromYaml }}
+            {{- $keycloakUrl := dig "keycloak" "url" "" $vals }}
+            {{- if $keycloakUrl }}
+            # NOT A KNOB IN values.yaml TODAY -- biz.md section 5 requires
+            # the controlplane to validate the customer's Keycloak JWT
+            # itself (JWKS is public/cacheable), so it needs to be told
+            # where Keycloak is. Wired via `dig` with an empty default so
+            # this template does not error against the unmodified scaffold;
+            # flagged in `notes` for whoever owns values.yaml to make a real
+            # field. Set with `--set keycloak.url=...` until then.
+            - name: KEYCLOAK_URL
+              value: {{ $keycloakUrl | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ dig "keycloak" "realm" "nivo" $vals | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.appPod.controlplane.resources | nindent 12 }}
+          # THE ONLY readinessProbe IN THIS POD, on purpose. A readinessProbe
+          # on openclaw/n8n/mcp below would gate the whole Pod's Ready
+          # condition on THEIR liveness too -- and since this Service (the
+          # sole public surface, biz.md section 5) only ever routes to Pods
+          # that are fully Ready, a slow-to-boot n8n would pull the
+          # controlplane's command API out of rotation along with it, even
+          # though nothing about `health`/`create-presign` actually depends
+          # on n8n. Only the controlplane's own state is what "ready" is
+          # supposed to mean here.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: controlplane
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # tcpSocket, NOT the same /healthz -- /healthz answers HTTP 503 BY
+          # DESIGN whenever the provision marker is missing or stale (biz.md
+          # section 8: "not-ready plus a loud log, never quietly serving a
+          # half-configured instance"). A livenessProbe on that endpoint
+          # would restart-loop a pod that is correctly waiting on `nivo-cli
+          # provision` to finish, mistaking "honestly not ready yet" for
+          # "broken."
+          livenessProbe:
+            tcpSocket:
+              port: controlplane
+            initialDelaySeconds: 10
+            periodSeconds: 15
+
+        {{- if .Values.appPod.openclaw.enabled }}
+        # ---------------------------------------------------------------
+        # openclaw -- the chat agent. Enabled by default; see values.yaml's
+        # own header on `appPod.openclaw.enabled` for the local/dev-only
+        # reason a chart would ever ship with this off.
+        # ---------------------------------------------------------------
+        - name: openclaw
+          image: {{ include "agentos.appImage" (dict "root" $ "img" .Values.image.openclaw) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            # 18789 is HARDCODED, not `.Values.appPod.openclaw.port` -- this
+            # is the port docs/OPENCLAW-GATEWAY-PROTOCOL.md measured against
+            # a LIVE pod for the raw-WebSocket gateway AND for its HTTP
+            # surface (`/health`, `/socket.io/...`, `/rpc`, `/status` all
+            # answered on it; no second HTTP port was observed). See this
+            # chart's `notes` for the resulting disagreement with
+            # `appPod.openclaw.port` in values.yaml, which predates that
+            # measurement and looks like a leftover guess -- kept below,
+            # unused by anything in this template, so it is not silently
+            # dropped if it turns out to be real.
+            - name: gateway
+              containerPort: 18789
+              protocol: TCP
+          volumeMounts:
+            - name: state
+              mountPath: /home/node/.openclaw
+              subPath: openclaw
+          resources:
+            {{- toYaml .Values.appPod.openclaw.resources | nindent 12 }}
+          # No ordering guarantee against anything else in the pod either,
+          # but OpenClaw's own boot (loading its config, standing up the
+          # gateway) is what this waits out -- generous on purpose, the same
+          # shape as MCP's wait on Qdrant below.
+          startupProbe:
+            tcpSocket:
+              port: gateway
+            periodSeconds: 5
+            failureThreshold: 60
+          # No readinessProbe -- see the controlplane container's own
+          # readinessProbe comment for why gating the whole Pod on this
+          # container specifically would be wrong.
+          livenessProbe:
+            httpGet:
+              # Confirmed real HTTP, not the SPA fallback everything else on
+              # this port answers with: `{"ok":true,"status":"live"}`
+              # (docs/OPENCLAW-GATEWAY-PROTOCOL.md).
+              path: /health
+              port: gateway
+            periodSeconds: 15
+        {{- else }}
+        # openclaw.enabled=false: AGENT-LESS. biz.md section 1 defines the
+        # PRODUCT as the agent -- a release with this container off is not a
+        # smaller AgentOS, it is an incomplete one. This branch exists only
+        # for local/dev bring-up before a real `nivo/openclaw` image exists
+        # to pull; it must never be the shape a paying customer's instance
+        # renders with.
+        {{- end }}
+
+        # ---------------------------------------------------------------
+        # n8n -- the automation engine. Single-instance by design (biz.md
+        # section 8, "Scaling": queue mode is "a deliberate migration rather
+        # than a replica count", and this pod never takes that migration).
+        # ---------------------------------------------------------------
+        - name: n8n
+          image: {{ include "agentos.appImage" (dict "root" $ "img" .Values.image.n8n) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: n8n
+              containerPort: {{ .Values.appPod.n8n.port }}
+              protocol: TCP
+          env:
+            - name: N8N_PORT
+              value: {{ .Values.appPod.n8n.port | quote }}
+            - name: N8N_PROTOCOL
+              value: "http"
+            # n8n is reached only over `localhost` by the controlplane
+            # (there is no Service in front of it -- biz.md section 5); these
+            # three turn off n8n's own outbound calls to n8n.io, which would
+            # otherwise fire from every customer's pod for no purpose this
+            # product uses.
+            - name: N8N_DIAGNOSTICS_ENABLED
+              value: "false"
+            - name: N8N_VERSION_NOTIFICATIONS_ENABLED
+              value: "false"
+            - name: N8N_TEMPLATES_ENABLED
+              value: "false"
+            # SQLite, not the shared Postgres above -- n8n's own workflow
+            # database is one file under `/home/node/.n8n`, on the same
+            # `state` PVC every other pod-local write below shares, and
+            # giving it its own Postgres database would mean this chart
+            # deciding n8n's schema-migration story on top of `nivo-cli`'s
+            # own, which biz.md never asks for.
+            - name: DB_TYPE
+              value: "sqlite"
+          volumeMounts:
+            - name: state
+              mountPath: /home/node/.n8n
+              subPath: n8n
+          resources:
+            {{- toYaml .Values.appPod.n8n.resources | nindent 12 }}
+          # No readinessProbe -- see the controlplane container's comment.
+          livenessProbe:
+            # n8n's own built-in endpoint, not something this chart adds.
+            httpGet:
+              path: /healthz
+              port: n8n
+            initialDelaySeconds: 20
+            periodSeconds: 20
+
+        # ---------------------------------------------------------------
+        # mcp -- mcp-server-qdrant, a tool interface onto THIS instance's
+        # own Qdrant for the controlplane/OpenClaw to call.
+        # ---------------------------------------------------------------
+        - name: mcp
+          image: {{ include "agentos.appImage" (dict "root" $ "img" .Values.image.mcp) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: mcp
+              containerPort: {{ .Values.appPod.mcp.port }}
+              protocol: TCP
+          env:
+            - name: QDRANT_URL
+              value: {{ printf "http://%s-qdrant:6333" .Release.Name | quote }}
+            - name: COLLECTION_NAME
+              value: {{ dig "mcp" "collectionName" "knowledge" $vals | quote }}
+          resources:
+            {{- toYaml .Values.appPod.mcp.resources | nindent 12 }}
+          # NO ORDERING GUARANTEE against the qdrant StatefulSet below --
+          # containers in one Pod start together, and only initContainers
+          # enforce order, which biz.md section 5 rules out for this pod
+          # ("no sidecar and no initContainer"). So MCP is expected to WAIT
+          # BY RETRYING ITS OWN CONNECTION rather than the pod blocking on
+          # one; this startupProbe only keeps k8s from restart-looping the
+          # container while it does that -- it does not itself verify Qdrant
+          # is reachable, only that the process is up and listening.
+          # `appPod.mcp.startupProbe` (values.yaml) sets a high
+          # `failureThreshold` at a short `periodSeconds` for exactly this
+          # reason. Leaving this unhandled is what turns a slow Qdrant into
+          # a `CrashLoopBackOff` that reads like a broken chart.
+          startupProbe:
+            tcpSocket:
+              port: mcp
+            periodSeconds: {{ .Values.appPod.mcp.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.appPod.mcp.startupProbe.failureThreshold }}
+          # No readinessProbe -- see the controlplane container's comment.
+          livenessProbe:
+            tcpSocket:
+              port: mcp
+            periodSeconds: 30

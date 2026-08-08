@@ -1,0 +1,84 @@
+{{/*
+Everything the app pod needs to find itself and its stores, and NONE of it
+is secret — see values.yaml's header comment and README.md "No secret goes
+in a chart or its values". A password never belongs here even though a
+username or a hostname does; the subchart Secrets below are what the
+Deployment must read for the password half of each connection:
+
+  - `{{ include "agentos.fullname" . }}-postgresql` (Bitnami-generated) — postgres-password / password
+  - `{{ include "agentos.fullname" . }}-minio` (Bitnami-generated) — root-password
+  - the official qdrant chart has no auth by default (single-node, in-cluster only)
+
+The store HOSTNAMES below are `<release-name>-<subchart>`, exactly the
+convention values.yaml's "GENERATED-SECRET NAMING" comment already states
+for a subchart left at its default `nameOverride`/`fullnameOverride` (blank)
+— that convention comes from each subchart's OWN release-name-based fullname
+template, not from this chart's `agentos.fullname`, so it holds regardless
+of whatever `nameOverride`/`fullnameOverride` this chart itself is given.
+Confirmed by rendering the subcharts: `helm template smoke charts/agentos`
+produces Services `smoke-postgresql` (5432), `smoke-minio` (9000, port name
+`tcp-api`) and `smoke-qdrant` (6333 http / 6334 grpc). If a future change
+sets `postgresql.fullnameOverride` (etc.) this file's derivation must move
+with it.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agentos.fullname" . }}-config
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+data:
+  # Identity — the same triad the controlplane needs for its own webhook /
+  # OAuth callback config and for the owner check against `instance.owner`.
+  INSTANCE_ID: {{ .Values.instance.id | quote }}
+  INSTANCE_NAME: {{ .Values.instance.name | quote }}
+  INSTANCE_HOSTNAME: {{ include "agentos.hostname" . | quote }}
+
+  # Where the instance calls OUT to (biz.md section 8, "One direction") —
+  # heartbeat, job poll, telemetry. Not secret: it is a URL, not a
+  # credential; the credential that authenticates these calls is the
+  # instance's own private key (never in Helm at all) plus, once, the
+  # bootstrap token in the Secret alongside this file.
+  BACKEND_URL: {{ .Values.bootstrap.backendUrl | quote }}
+
+  # The one listener's own port, and the three internal containers'
+  # `containerPort`s it reaches over localhost (biz.md section 5 — "they
+  # share `localhost`"). Present here (rather than hardcoded in the
+  # Deployment) so a values.yaml port change never drifts from what the
+  # controlplane is told to dial.
+  CONTROLPLANE_PORT: {{ .Values.appPod.controlplane.port | quote }}
+  {{- if .Values.appPod.openclaw.enabled }}
+  OPENCLAW_PORT: {{ .Values.appPod.openclaw.port | quote }}
+  {{- end }}
+  N8N_PORT: {{ .Values.appPod.n8n.port | quote }}
+  MCP_PORT: {{ .Values.appPod.mcp.port | quote }}
+
+  {{- if .Values.postgresql.enabled }}
+
+  # Postgres — host/port/db/user only; the password lives in the Bitnami
+  # subchart's own generated Secret (see the file header above).
+  POSTGRES_HOST: {{ printf "%s-postgresql" .Release.Name | quote }}
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: {{ .Values.postgresql.auth.database | quote }}
+  POSTGRES_USER: {{ .Values.postgresql.auth.username | quote }}
+  {{- end }}
+
+  {{- if .Values.minio.enabled }}
+
+  # MinIO — the S3 API port the controlplane mints presigned upload URLs
+  # against (biz.md section 5, "Document upload"). Root password again
+  # lives only in the Bitnami-generated Secret.
+  MINIO_HOST: {{ printf "%s-minio" .Release.Name | quote }}
+  MINIO_PORT: "9000"
+  MINIO_ROOT_USER: {{ .Values.minio.auth.rootUser | quote }}
+  {{- end }}
+
+  {{- if .Values.qdrant.enabled }}
+
+  # Qdrant — this instance's own vector store (biz.md section 4, "cloned
+  # because of independence"); single-node, in-cluster only, no auth on
+  # the official chart's default configuration.
+  QDRANT_HOST: {{ printf "%s-qdrant" .Release.Name | quote }}
+  QDRANT_HTTP_PORT: "6333"
+  QDRANT_GRPC_PORT: "6334"
+  {{- end }}

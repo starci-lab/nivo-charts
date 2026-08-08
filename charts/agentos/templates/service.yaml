@@ -1,0 +1,23 @@
+# The ONE public listener for this instance -- biz.md section 5: "Exactly
+# one component listens." n8n, OpenClaw and mcp-server-qdrant are reached
+# over `localhost` from inside this same pod (see deployment.yaml) and get a
+# `containerPort` there, never a Service of their own: a Service in front of
+# any of them would be a second public surface biz.md never sanctions.
+#
+# The Ingress (a separate template, `.Values.ingress.*`) points at THIS
+# Service and this Service alone.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentos.fullname" . }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agentos.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: controlplane
+      port: {{ .Values.appPod.controlplane.port }}
+      targetPort: controlplane
+      protocol: TCP

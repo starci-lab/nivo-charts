@@ -1,0 +1,71 @@
+# The controlplane's OWN Job-spawning RBAC (biz.md section 5, "Jobs -- how
+# heavy work runs", rule 4) -- nothing more.
+#
+# WHY create/get/list AND NOTHING ELSE. `JobSpawnerService`
+# (apps/agentos-controlplane/src/jobs/job-spawner.service.ts) calls
+# `createNamespacedJob` to spawn `index-pending`/`sync-knowledge`, relying on
+# k8s's own 409 Conflict as the lock (biz.md's "the Job's fixed name IS the
+# lock") rather than a separate lease read -- so `create` is the verb actually
+# exercised today, and `get`/`list` are added for the job-status surfacing a
+# health check or the panel will need next, WITHOUT ever widening into
+# `delete`, `update` or a second resource. `delete` was deliberately left off:
+# a Job that finishes is cleaned up by its own TTL/backoff, not by the
+# internet-facing component reaching back in to remove evidence of what it
+# ran.
+#
+# This is the whole point of rule 4: job-creation RBAC on the component that
+# terminates public traffic is a privilege escalation ON TOP OF compromising
+# it -- compromising the controlplane already yields the store credentials
+# (biz.md section 7), but "create arbitrary Jobs in this namespace"
+# additionally buys persistence and a foothold in the cluster, and k8s RBAC
+# cannot constrain what a Job's pod spec actually runs. That containment is
+# why `JobSpawnerService` never takes the image as a parameter (its own
+# header: "IMAGE IS FIXED, NEVER A PARAMETER") -- the missing half, an
+# admission policy pinning the allowed image to `nivo-cli`, is a cluster-level
+# policy object outside this chart's scope, not a Helm value.
+#
+# Namespaced Role, not a ClusterRole: this identity must never reach a
+# neighbouring customer's namespace. Binds to the SAME ServiceAccount the app
+# pod's controlplane container runs as (`serviceAccount.name` in
+# values.yaml) -- the hook Job and the backup CronJob below do not bind here,
+# because neither of them spawns a Job of its own and giving them this grant
+# would be exactly the unnecessary widening this rule exists to prevent.
+#
+# NOT COVERED HERE, ON PURPOSE: `IdentitySecretStore`
+# (apps/agentos-controlplane/src/identity/identity-secret-store.ts) reads and
+# writes a k8s Secret via `readNamespacedSecret` / `createNamespacedSecret` /
+# `patchNamespacedSecret` on the controlplane's own ServiceAccount -- a
+# `get`/`create`/`patch` grant on `secrets`, not `jobs`. That is a genuinely
+# separate RBAC need this Role does not grant (see this task's `notes`); it
+# belongs beside whoever templates the Deployment that names
+# `NIVO_IDENTITY_SECRET_NAME`, not folded into the Job-spawning Role biz.md
+# section 5 rule 4 scopes this narrowly to.
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "agentos.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "agentos.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "agentos.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agentos.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

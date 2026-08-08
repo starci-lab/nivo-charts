@@ -1,0 +1,169 @@
+# `agentos-cli provision` as a Helm post-install/post-upgrade hook -- biz.md
+# section 5 ("nivo-cli provision runs as the Helm post-install/post-upgrade
+# hook, seeds n8n and OpenClaw") and section 8 ("Provisioning is a release
+# event, not a pod event").
+#
+# A HOOK JOB, NEVER AN INITCONTAINER. An initContainer re-runs on EVERY pod
+# restart -- a node drain, an OOM, an upgrade -- so a 60-second seed would
+# cost 60 seconds of silent agent each time it fired. A hook Job runs ONCE
+# PER RELEASE EVENT; a plain restart costs nothing, because
+# ProvisionCommand's own idempotence (apps/agentos-cli/src/commands
+# /provision.command.ts) means the controlplane simply finds the marker
+# already current at startup and serves.
+#
+# A FAILED HOOK MUST FAIL THE RELEASE. No `hook-delete-policy` entry deletes
+# on failure (only `before-hook-creation,hook-succeeded`) -- a failed Job's
+# pod stays so `kubectl logs` on the NEXT provision attempt still has
+# something to read, and Helm itself reports the release as failed rather
+# than "deployed" when a hook Job's pod exits non-zero. That is what makes a
+# broken provision surface at deploy time (biz.md section 8, step 9) instead
+# of at the customer's first chat.
+#
+# `{{ .Release.Revision }}` IN THE NAME. A Job's pod template is immutable, so
+# re-running the SAME name on `post-upgrade` would 409 forever without
+# `before-hook-creation` -- which only removes the PREVIOUS hook's resources
+# right before this one is created, not mid-upgrade. Suffixing the revision
+# keeps every hook run's name unique and keeps `before-hook-creation`'s
+# cleanup doing exactly one thing: removing last release's hook Job, never
+# colliding with this one.
+#
+# ENV CONTRACT VERIFIED AGAINST THE REAL APP, not invented: every variable
+# name below is read by `apps/agentos-cli/src/config.ts` via
+# `apps/agentos-cli/src/env/parse-env.ts`, confirmed by reading both files in
+# nivo-backend directly (see this task's `notes` for the two gaps that could
+# not be resolved from chart-owned values -- N8N_OWNER_PASSWORD/S3_*/
+# NIVO_KNOWLEDGE_SHA -- and why leaving them unset is the CORRECT behaviour
+# today, not a broken template).
+{{- if .Values.provision.enabled }}
+{{- $knowledge := .Values.knowledge | default dict }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "agentos.fullname" . }}-provision-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provision
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.provision.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.provision.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "agentos.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: provision
+    spec:
+      restartPolicy: Never
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: provision
+          image: {{ include "agentos.cliImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # EXPLICIT `command`, NOT JUST `args` -- verified against the real
+          # image (apps/agentos-cli/Dockerfile: `CMD ["node",
+          # "dist/apps/agentos-cli/src/main.js"]`, no ENTRYPOINT of its own,
+          # so it inherits `node:22-alpine`'s `docker-entrypoint.sh`). That
+          # script prepends `node` to argv ONLY when argv[0] is not a
+          # recognised system command; `args: ["provision"]` alone made it
+          # exec literally `node provision`, which Node then tried to
+          # `require("/app/provision")` and crashed with MODULE_NOT_FOUND
+          # before nest-commander ever ran -- caught by actually installing
+          # this chart on the live cluster, not by reading the Dockerfile
+          # alone. Setting `command` explicitly bypasses that heuristic
+          # instead of depending on it.
+          command: ["node", "dist/apps/agentos-cli/src/main.js"]
+          args: ["provision"]
+          env:
+            # -- identity -----------------------------------------------
+            - name: NIVO_POD_ID
+              value: {{ .Values.instance.id | quote }}
+            # Paired with the controlplane's own appVersion by Chart.yaml's
+            # single `appVersion` field, on purpose (biz.md section 5: "The
+            # controlplane and the CLI ship as ONE version, from one tag").
+            - name: NIVO_IMAGE_VERSION
+              value: {{ .Chart.AppVersion | quote }}
+
+            # -- step (b): exchange the bootstrap token ------------------
+            - name: NIVO_CONTROL_PLANE_URL
+              value: {{ .Values.bootstrap.backendUrl | quote }}
+            - name: NIVO_POD_REGISTRATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.fullname" . }}-bootstrap
+                  key: token
+
+            # -- the instance database (Bitnami postgresql subchart) -----
+            # Host/secret name follow Bitnami's own `common.names.fullname`:
+            # verified against the pulled dependency chart
+            # (postgresql-18.8.6.tgz) that with no `nameOverride` and a
+            # release name that does not already contain "postgresql", the
+            # fullname -- and therefore the auto-generated auth Secret's
+            # name -- is `<release-name>-postgresql`. The custom user's
+            # password lands under the `password` key (`postgres-password`
+            # is the superuser's, a different key, deliberately not used
+            # here since `postgresql.auth.username` is not `postgres`).
+            - name: DB_HOST
+              value: {{ printf "%s-postgresql" .Release.Name | quote }}
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: DB_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-postgresql" .Release.Name }}
+                  key: password
+
+            # -- this instance's own Qdrant (official qdrant subchart) ---
+            # No API key: `qdrant.apiKey` is unset in values.yaml, so the
+            # subchart never creates a `-apikey` Secret. Leaving
+            # QDRANT_API_KEY unset here is the correct match for that, not
+            # an oversight -- `ProvisionCommand.logCredentialPresence` logs
+            # `qdrantApiKey=false` and continues.
+            - name: QDRANT_URL
+              value: {{ printf "http://%s-qdrant:6333" .Release.Name | quote }}
+            # Matches the controlplane's own default collection name
+            # (apps/agentos-controlplane/src/config.ts) so provision and the
+            # controlplane read and write the SAME collection without a
+            # chart-level knob to keep the two in sync.
+            - name: QDRANT_COLLECTION
+              value: "knowledge"
+
+            # -- step (e): recover the knowledge snapshot ----------------
+            # GAP, NAMED RATHER THAN FAKED (see this task's `notes`):
+            # `knowledge.sha` / `knowledge.snapshotUrl` are not yet knobs in
+            # values.yaml. Left unset, `config.knowledgeSha` is empty and
+            # ProvisionCommand's own designed behaviour is to log
+            # "NIVO_KNOWLEDGE_SHA unset -- skipping knowledge recovery" and
+            # continue -- a graceful skip, not a crash, until backend's
+            # provisioning sequence actually threads a SHA through here.
+            - name: NIVO_KNOWLEDGE_SHA
+              value: {{ $knowledge.sha | default "" | quote }}
+            - name: NIVO_KNOWLEDGE_SNAPSHOT_URL
+              value: {{ $knowledge.snapshotUrl | default "" | quote }}
+
+            # -- n8n (same pod, same-container localhost) ----------------
+            - name: N8N_URL
+              value: {{ printf "http://localhost:%d" (.Values.appPod.n8n.port | int) | quote }}
+            # N8N_OWNER_PASSWORD deliberately absent: biz.md section 7
+            # assigns minting it to the controlplane's own
+            # InternalCredentialsService, which
+            # apps/agentos-cli/src/commands/provision.command.ts's own header
+            # names as not built yet ("Today's chart instead delivers those
+            # as pre-provisioned k8s Secrets"). No such Secret exists in this
+            # chart yet either -- see this task's `notes`. Leaving it unset
+            # matches `logCredentialPresence`'s own designed
+            # `n8nOwnerPassword=false` path, not a broken template.
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+{{- end }}

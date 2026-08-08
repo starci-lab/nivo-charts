@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT
+apiVersion: v2
+name: expert-academy
+description: >-
+  One Expert Academy instance — an expert's course site plus a RAG chatbot
+  over their own uploaded resources. One Helm release per expert (biz.md
+  section 1). The app pod is a single Deployment (api + web); NO OpenClaw,
+  NO n8n — biz.md section 6 is explicit this is not a second copy of the
+  AgentOS pod. postgresql and qdrant are separate stateful workloads pulled
+  in as subcharts below.
+type: application
+home: N/A
+icon: https://r2.kanibot.xyz/kani.png
+keywords:
+  - expert-academy
+  - nivo
+maintainers:
+  - name: starci183
+    url: "https://x.com/0xstacynguyen"
+annotations:
+  category: Application
+  licenses: MIT
+
+# See charts/agentos/Chart.yaml's comment above `dependencies:` for why every
+# version below is a patch-pinned tilde range and every image tag below (in
+# values.yaml) is a frozen `bitnamilegacy` tag rather than Bitnami's own
+# `latest`-tagged default — the same reasoning applies verbatim here.
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  - name: postgresql
+    version: "~18.8.0"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+  - name: qdrant
+    # Same pinning discipline as agentos: keep this number equal to
+    # agentos's qdrant pin unless there is a reason to diverge — the backend
+    # builds ONE knowledge snapshot (biz.md section 8) that both product's
+    # instances recover from, and a version skew there is exactly the
+    # mismatch that forces the slower scroll+upsert fallback.
+    version: "~1.18.0"
+    repository: https://qdrant.github.io/qdrant-helm
+    condition: qdrant.enabled

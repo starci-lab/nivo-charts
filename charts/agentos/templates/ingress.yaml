@@ -1,0 +1,129 @@
+{{/*
+The single public surface (biz.md section 5) has two halves that must stay
+WALLED APART: the command API (the customer's panel — GraphQL plus the
+Socket.IO re-export of the OpenClaw gateway bridge, see
+docs/OPENCLAW-GATEWAY-PROTOCOL.md) answers a Keycloak JWT plus the owner
+check; the webhook ingress (Zalo/Telegram/Meta) answers only the platform's
+own signature and carries no JWT at all. "A forged webhook must not be able
+to reach a command" is enforced first by the controlplane itself (separate
+modules, biz.md section 5 / apps-controlplane-and-cli.md — a webhook route
+must never resolve a command resolver), but nginx-ingress annotations are
+scoped to the whole Ingress OBJECT, not to one path inside it — so the only
+way to give the two halves genuinely different edge behaviour (below: sticky
+sessions + long timeouts on one, a larger body allowance on the other) is
+TWO Ingress objects on the same host, split by path. `/webhook` is the more
+specific prefix, so ingress-nginx always routes it there ahead of the
+catch-all `/` — the split is real routing, not decorative.
+
+Both point at the same Service/port: the controlplane is "the only listener"
+(biz.md section 5), so there is exactly one backend to send either half to;
+the wall is which EDGE BEHAVIOUR applies on the way in, and which app-side
+module answers once it arrives.
+
+ASSUMPTION, stated because this chart's Service is built by a different
+template than this one: the Service is named `{{ include "agentos.fullname" . }}`
+and forwards to `.Values.appPod.controlplane.port` — the port `_helpers.tpl`
+already documents as "the ONE container with a Service in front of it".
+If the Service template lands under a different name, update `.serviceName`
+below to match.
+*/}}
+{{- if .Values.ingress.enabled }}
+{{- $fullName := include "agentos.fullname" . }}
+{{- $svcPort := .Values.appPod.controlplane.port }}
+{{- $host := include "agentos.hostname" . }}
+{{- $tlsBlock := list }}
+{{- if .Values.ingress.tls.enabled }}
+{{- $tlsBlock = list (dict "hosts" (list $host) "secretName" .Values.ingress.tls.secretName) }}
+{{- end }}
+---
+# The COMMAND half — the customer's panel: GraphQL commands
+# (create-presign, run-rag-job, write-channel-key, health) plus the
+# controlplane's Socket.IO re-export of the OpenClaw gateway bridge.
+# Everything that is NOT `/webhook` lands here, including `/graphql` and
+# `/socket.io`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}-command
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+    agentos.nivo.vn/door-half: command
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    # Socket.IO's upgrade (Connection/Upgrade headers) is passed through by
+    # ingress-nginx automatically for an HTTP/1.1 backend — no annotation
+    # buys that part. What default nginx settings WOULD kill a live socket:
+    # (1) the 60s default proxy-read/send timeout closes an idle-but-alive
+    #     connection well inside a normal chat session, and (2) although
+    #     `appPod` pins `replicas: 1` on purpose (never for horizontal
+    #     scale — see values.yaml), a Deployment's default RollingUpdate
+    #     still runs old-and-new pod together for the width of one rollout,
+    #     which is a real moment where a client's socket could otherwise be
+    #     bounced to the other pod mid-session. Cookie affinity make that
+    #     moment a non-event instead of a dropped chat.
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+    nginx.ingress.kubernetes.io/session-cookie-name: {{ printf "%s-affinity" $fullName }}
+    nginx.ingress.kubernetes.io/session-cookie-path: "/"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if $tlsBlock }}
+  tls:
+    {{- toYaml $tlsBlock | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+---
+# The WEBHOOK half — Zalo / Telegram / Meta deliver here, unauthenticated by
+# necessity (no platform attaches a nivo JWT); the controlplane's webhook
+# module verifies each platform's own signature
+# (`X-Hub-Signature-256` / Telegram secret token / Zalo MAC) once the
+# request arrives. This Ingress deliberately carries NEITHER the affinity
+# NOR the long-timeout annotations above: a webhook delivery is one
+# short-lived request-response, never a held-open session, so sticky
+# routing would only add a cookie nothing reads. It gets a larger body
+# allowance instead, sized for platform payloads that embed media
+# references alongside the event.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}-webhook
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+    agentos.nivo.vn/door-half: webhook
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if $tlsBlock }}
+  tls:
+    {{- toYaml $tlsBlock | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $host }}
+      http:
+        paths:
+          - path: /webhook
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+{{- end }}

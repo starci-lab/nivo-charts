@@ -1,0 +1,54 @@
+# One Ingress, one host, two path-routed backends -- both at the SAME
+# Service (templates/service.yaml, a different slice, already created: ONE
+# ClusterIP Service named `expert-academy.fullname` in front of the one app
+# pod, exposing two NAMED ports, "api" and "web"). biz.md section 6: unlike
+# AgentOS there is no webhook-vs-command wall to keep apart here, so routing
+# by path at a single host is enough -- no second Ingress, no second Service.
+#
+# Host: `<instance.name>.<instance.baseDomain>` unless `ingress.host` is set
+# (see `expert-academy.hostname` in _helpers.tpl) -- the same
+# `<slug>.<baseDomain>` shape charts/agentos uses for its own hostname,
+# spelled here against the knobs this chart's values.yaml already defines.
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "expert-academy.fullname" . }}
+  labels:
+    {{- include "expert-academy.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ include "expert-academy.hostname" . | quote }}
+      secretName: {{ required "ingress.tls.secretName is required when ingress.tls.enabled is true" .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ include "expert-academy.hostname" . | quote }}
+      http:
+        paths:
+          # Listed before "/" on purpose: ingress-nginx itself resolves
+          # overlapping prefixes by specificity regardless of list order, but
+          # a controller with simpler list-order matching still routes
+          # correctly this way -- cheap to get right, expensive to debug if
+          # wrong only on a different ingress controller.
+          - path: {{ .Values.ingress.api.path }}
+            pathType: {{ .Values.ingress.api.pathType }}
+            backend:
+              service:
+                name: {{ include "expert-academy.fullname" . }}
+                port:
+                  name: api
+          - path: {{ .Values.ingress.web.path }}
+            pathType: {{ .Values.ingress.web.pathType }}
+            backend:
+              service:
+                name: {{ include "expert-academy.fullname" . }}
+                port:
+                  name: web
+{{- end }}

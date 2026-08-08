@@ -1,0 +1,69 @@
+# The controlplane's OWN k8s Secret -- `IdentitySecretStore`
+# (apps/agentos-controlplane/src/identity/identity-secret-store.ts) calls
+# `readNamespacedSecret` / `createNamespacedSecret` / `patchNamespacedSecret`
+# against `NIVO_IDENTITY_SECRET_NAME` (deployment.yaml), which holds this
+# pod's own generated key pair (biz.md section 8: "the pod generates its own
+# key pair on first boot; the private key is created there and never
+# leaves") and the channel-credential envelope data key (section 7).
+#
+# CONFIRMED LOAD-BEARING, NOT SPECULATIVE: `helm install` against the live
+# kind-nivo-e2e cluster and reading the real controlplane image's own logs
+# shows exactly this gap --
+#
+#   [ChoresService] registerKey failed at boot {
+#     detail: 'Identity Secret unavailable: read smoke-agentos-identity: HTTP request failed'
+#   }
+#
+# -- without this Role the controlplane can authenticate to the k8s API (the
+# ServiceAccount token is always mounted) but has no permission to read or
+# write the Secret it needs, so it can never complete `registerKey` and the
+# instance never leaves "not-ready."
+#
+# SEPARATE FROM `rbac.yaml`'s Job-spawning Role, on purpose -- that Role's
+# own header calls this out explicitly as "a genuinely separate RBAC need
+# this Role does not grant... belongs beside whoever templates the
+# Deployment that names `NIVO_IDENTITY_SECRET_NAME`." Two Roles bound to the
+# same ServiceAccount is ordinary k8s; folding a `secrets` grant into the
+# Job-spawning Role would blur the narrow, single-purpose scoping rule 4
+# exists to enforce.
+#
+# TWO RULES, NOT ONE, because `resourceNames` cannot gate `create` (the
+# object does not exist yet on the first boot that creates it) but CAN and
+# SHOULD gate `get`/`patch` once it does -- narrowing those two to the exact
+# Secret name this pod is ever allowed to touch, rather than every Secret in
+# the namespace (which would also include the postgresql/minio subcharts'
+# generated credential Secrets this same ServiceAccount has no other reason
+# to read).
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "agentos.fullname" . }}-identity
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ printf "%s-identity" (include "agentos.fullname" .) | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "agentos.fullname" . }}-identity
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "agentos.fullname" . }}-identity
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "agentos.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
