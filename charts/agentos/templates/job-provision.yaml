@@ -151,7 +151,46 @@ spec:
             - name: NIVO_KNOWLEDGE_SNAPSHOT_URL
               value: {{ $knowledge.snapshotUrl | default "" | quote }}
 
-            # -- n8n (same pod, same-container localhost) ----------------
+            # -- knowledge MCP -------------------------------------------
+            # NOT a URL this Job dials. `soul` only WRITES it into the
+            # customer's `openclaw.json`, and the process that later opens
+            # that file is OpenClaw -- which lives in the app Pod beside the
+            # `mcp` container. The value therefore has to resolve from
+            # OPENCLAW's position, not from this Job's, and loopback is
+            # correct for exactly that reader.
+            #
+            # WITHOUT THIS LINE THE AGENT LOSES `knowledge_search` IN
+            # SILENCE. `apps/agentos-cli/src/config.ts` falls back to
+            # `http://nivo-sidecar:3000/mcp`, and no template in this chart
+            # has ever created a Service by that name -- biz.md section 5 is
+            # explicit that there is no sidecar. A tool that cannot connect
+            # raises nothing anyone sees; the agent simply stops being able to
+            # answer from the knowledge base, and every log line still reads
+            # healthy.
+            #
+            # The `/mcp` suffix is mcp-server-qdrant's streamable-http
+            # endpoint. It is deliberately absent from `MCP_URL` in
+            # deployment.yaml, which the controlplane joins its own path onto:
+            # the two env vars name the same server and are not
+            # interchangeable.
+            - name: KNOWLEDGE_MCP_URL
+              value: {{ printf "http://127.0.0.1:%d/mcp" (.Values.appPod.mcp.port | int) | quote }}
+
+            # -- n8n ------------------------------------------------------
+            # THIS VALUE IS WRONG TODAY, AND IS LEFT WRONG RATHER THAN
+            # GUESSED AT. This is a Helm hook `kind: Job`, so it runs in ITS
+            # OWN Pod: `localhost` reaches this container and never n8n in the
+            # app Pod. The comment that used to sit here claimed "same pod,
+            # same-container localhost", which is what kept the mistake
+            # invisible. Unlike KNOWLEDGE_MCP_URL above, this URL IS dialled
+            # by the Job (n8n seeding), so the reader's position is this Pod.
+            #
+            # There is no correct value to drop in: n8n has no Service,
+            # because biz.md section 5 says the controlplane is the only thing
+            # that listens. The fix is a design call between publishing an
+            # internal Service for n8n and moving the seeding into the
+            # controlplane, which already shares n8n's localhost. Deciding it
+            # inside a template is how it would get decided by nobody.
             - name: N8N_URL
               value: {{ printf "http://localhost:%d" (.Values.appPod.n8n.port | int) | quote }}
             # N8N_OWNER_PASSWORD deliberately absent: biz.md section 7

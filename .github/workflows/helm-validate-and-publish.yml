@@ -27,6 +27,11 @@ concurrency:
 env:
   OUT_DIR: public/charts
   PKG_DIR: public/charts
+  # The published repository URL. It is a custom domain, not the
+  # `<owner>.github.io/<repo>` default, and `public/CNAME` is what tells
+  # GitHub Pages to answer on it -- the two must agree or the domain serves a
+  # 404 while every step here still goes green.
+  CHARTS_DOMAIN: charts.nivo.vn
 
 jobs:
   validate:
@@ -120,11 +125,34 @@ jobs:
         # `helm repo add nivo-charts https://<owner>.github.io/<repo>/charts`
         # serve both from a single repo URL.
         run: |
-          OWNER="$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f1)"
-          REPO="$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2)"
-          BASE_URL="https://${OWNER}.github.io/${REPO}/charts"
+          BASE_URL="https://${CHARTS_DOMAIN}/charts"
 
+          # THE URL BAKED IN HERE IS THE ONE CLIENTS ACTUALLY FETCH FROM.
+          # `helm repo index --url` writes an absolute download URL for every
+          # entry, so `helm repo add` succeeding proves only that index.yaml
+          # was reachable -- if this URL is stale, the FAILURE lands later, on
+          # `helm install`, as a 404 on the .tgz. That is why it is derived
+          # from CHARTS_DOMAIN rather than from GITHUB_REPOSITORY: the repo
+          # can be renamed or transferred between owners (this one already
+          # moved from starci183 to starci-lab) without silently repointing
+          # every published chart at an address nothing serves.
           helm repo index "${OUT_DIR}" --url "${BASE_URL}"
+
+      - name: Verify the custom domain is wired
+        # Cheap, and it catches the one failure this setup is prone to: a
+        # CNAME that drifts from the URL in index.yaml. Pages would serve the
+        # site and helm would resolve the index, so nothing looks broken until
+        # a customer's provision Job cannot pull its chart.
+        run: |
+          test -f public/CNAME || { echo "public/CNAME missing"; exit 1; }
+          test "$(tr -d '[:space:]' < public/CNAME)" = "${CHARTS_DOMAIN}" || {
+            echo "public/CNAME is $(cat public/CNAME), expected ${CHARTS_DOMAIN}"
+            exit 1
+          }
+          grep -q "https://${CHARTS_DOMAIN}/charts" "${OUT_DIR}/index.yaml" || {
+            echo "index.yaml does not carry https://${CHARTS_DOMAIN}/charts"
+            exit 1
+          }
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
