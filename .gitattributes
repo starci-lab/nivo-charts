@@ -1,0 +1,18 @@
+# Vendored Bitnami subcharts are gzip archives. Git's auto-detection happens to
+# classify them as binary today, which means `core.autocrlf=true` leaves them
+# alone -- but "happens to" is not a guarantee, and this repo is developed on
+# Windows where autocrlf is on. A single CRLF substitution inside a .tgz makes
+# `helm dependency build` fail with a checksum mismatch against Chart.lock, and
+# the error names the checksum, not the line endings, so the cause is not where
+# anyone looks first. nivo-backend already lost an afternoon to exactly this
+# class of failure with sops-encrypted files.
+*.tgz -text
+*.gz -text
+
+# Everything Helm reads is text and must land with LF, because the charts are
+# rendered inside Linux containers regardless of where they were authored.
+*.yaml text eol=lf
+*.yml text eol=lf
+*.tpl text eol=lf
+*.md text eol=lf
+.helmignore text eol=lf
