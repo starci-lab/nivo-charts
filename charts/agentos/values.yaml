@@ -87,10 +87,13 @@ appPod:
       requests: { cpu: 100m, memory: 256Mi }
       limits: { cpu: "1", memory: 1Gi }
   controlplane:
-    # The ONLY container with a Service in front of it — biz.md section 5:
-    # "Exactly one component listens". openclaw/n8n/mcp below are reached by
-    # the controlplane over `localhost` inside this same pod; they get a
-    # `containerPort` for the Deployment spec and nothing else.
+    # The only container behind the INGRESS — biz.md section 5: "Exactly one
+    # component listens". openclaw/n8n/mcp below are reached by the
+    # controlplane over `localhost` inside this same pod. n8n additionally
+    # has an internal ClusterIP Service (templates/service-n8n.yaml), because
+    # the `agentos-cli provision` hook Job runs in its OWN pod and must dial
+    # n8n by name; a ClusterIP is not exposure — the Ingress is, and it
+    # points only here.
     port: 3000
     resources:
       requests: { cpu: 100m, memory: 256Mi }

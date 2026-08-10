@@ -147,8 +147,27 @@ spec:
               value: "ws://127.0.0.1:18789"
             - name: OPENCLAW_ENABLED
               value: {{ .Values.appPod.openclaw.enabled | quote }}
+            # Loopback here and a Service DNS name in job-provision.yaml is
+            # not an inconsistency: this container really is in the same Pod
+            # as n8n, and the provision hook Job really is not.
             - name: N8N_URL
               value: {{ printf "http://127.0.0.1:%d" (int .Values.appPod.n8n.port) | quote }}
+            # THE SAME Secret THE PROVISION JOB READS -- one static value,
+            # two readers. `agentos-cli provision` creates n8n's owner
+            # account with this password; the controlplane is the component
+            # that drives n8n from then on (biz.md section 5: it "drives n8n,
+            # OpenClaw and the stores"), so it needs the credential the owner
+            # was actually created with. Minting it in two places would leave
+            # this container holding a password n8n never accepted -- which is
+            # the entire reason secret-n8n.yaml exists rather than two
+            # `randAlphaNum` calls. See that file for why a template-created
+            # Secret is legal under biz.md section 8 where a values entry is
+            # not, and why it is `lookup`ed rather than regenerated.
+            - name: N8N_OWNER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.n8nSecretName" . }}
+                  key: {{ include "agentos.n8nOwnerPasswordKey" . }}
             - name: MCP_URL
               value: {{ printf "http://127.0.0.1:%d" (int .Values.appPod.mcp.port) | quote }}
             # --- stores: hostnames follow the subcharts' own default
@@ -320,9 +339,12 @@ spec:
               value: {{ .Values.appPod.n8n.port | quote }}
             - name: N8N_PROTOCOL
               value: "http"
-            # n8n is reached only over `localhost` by the controlplane
-            # (there is no Service in front of it -- biz.md section 5); these
-            # three turn off n8n's own outbound calls to n8n.io, which would
+            # n8n is reached over `localhost` by the controlplane in this
+            # same Pod, and over its own internal ClusterIP Service
+            # (service-n8n.yaml) by the provision hook Job, which runs in a
+            # different Pod. Neither is behind the Ingress, so neither is a
+            # public surface. These three turn off n8n's own outbound calls
+            # to n8n.io, which would
             # otherwise fire from every customer's pod for no purpose this
             # product uses.
             - name: N8N_DIAGNOSTICS_ENABLED

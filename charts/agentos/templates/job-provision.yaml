@@ -30,10 +30,10 @@
 # ENV CONTRACT VERIFIED AGAINST THE REAL APP, not invented: every variable
 # name below is read by `apps/agentos-cli/src/config.ts` via
 # `apps/agentos-cli/src/env/parse-env.ts`, confirmed by reading both files in
-# nivo-backend directly (see this task's `notes` for the two gaps that could
-# not be resolved from chart-owned values -- N8N_OWNER_PASSWORD/S3_*/
-# NIVO_KNOWLEDGE_SHA -- and why leaving them unset is the CORRECT behaviour
-# today, not a broken template).
+# nivo-backend directly. N8N_OWNER_PASSWORD is no longer among the gaps --
+# it now comes from secret-n8n.yaml, the same Secret the controlplane reads;
+# S3_* and NIVO_KNOWLEDGE_SHA remain unset, and each says at its own line
+# why unset is the CORRECT behaviour today rather than a broken template.
 {{- if .Values.provision.enabled }}
 {{- $knowledge := .Values.knowledge | default dict }}
 apiVersion: batch/v1
@@ -177,31 +177,42 @@ spec:
               value: {{ printf "http://127.0.0.1:%d/mcp" (.Values.appPod.mcp.port | int) | quote }}
 
             # -- n8n ------------------------------------------------------
-            # THIS VALUE IS WRONG TODAY, AND IS LEFT WRONG RATHER THAN
-            # GUESSED AT. This is a Helm hook `kind: Job`, so it runs in ITS
-            # OWN Pod: `localhost` reaches this container and never n8n in the
-            # app Pod. The comment that used to sit here claimed "same pod,
-            # same-container localhost", which is what kept the mistake
-            # invisible. Unlike KNOWLEDGE_MCP_URL above, this URL IS dialled
-            # by the Job (n8n seeding), so the reader's position is this Pod.
+            # A CLUSTER DNS NAME, NOT `localhost` -- and the contrast with
+            # KNOWLEDGE_MCP_URL directly above is the whole point. That value
+            # is only WRITTEN into a config file for OpenClaw to open later,
+            # so it has to resolve from OPENCLAW's position (loopback, inside
+            # the app Pod). This one is DIALLED, by this Job, right here
+            # (`apps/agentos-cli/src/n8n/n8n-seed.service.ts` -- a real
+            # `fetch(config.n8n.url + path)`), and a hook `kind: Job` runs in
+            # its own Pod where `localhost` reaches this container and
+            # nothing else. Two env vars, two readers, two different correct
+            # answers.
             #
-            # There is no correct value to drop in: n8n has no Service,
-            # because biz.md section 5 says the controlplane is the only thing
-            # that listens. The fix is a design call between publishing an
-            # internal Service for n8n and moving the seeding into the
-            # controlplane, which already shares n8n's localhost. Deciding it
-            # inside a template is how it would get decided by nobody.
+            # The host comes from `agentos.n8nServiceName` (defined in
+            # service-n8n.yaml, which creates the Service) rather than being
+            # spelled out here, so the name dialled and the name created
+            # cannot drift by a character.
             - name: N8N_URL
-              value: {{ printf "http://localhost:%d" (.Values.appPod.n8n.port | int) | quote }}
-            # N8N_OWNER_PASSWORD deliberately absent: biz.md section 7
-            # assigns minting it to the controlplane's own
-            # InternalCredentialsService, which
-            # apps/agentos-cli/src/commands/provision.command.ts's own header
-            # names as not built yet ("Today's chart instead delivers those
-            # as pre-provisioned k8s Secrets"). No such Secret exists in this
-            # chart yet either -- see this task's `notes`. Leaving it unset
-            # matches `logCredentialPresence`'s own designed
-            # `n8nOwnerPassword=false` path, not a broken template.
+              value: {{ printf "http://%s:%d" (include "agentos.n8nServiceName" .) (.Values.appPod.n8n.port | int) | quote }}
+            # WITHOUT THIS THE PROVISION FAILS OUTRIGHT, it does not degrade:
+            # `n8n-seed.service.ts` throws `RequiredCredentialMissingException`
+            # the moment `N8N_URL` is set and the password is not, and the
+            # seed IS reached on a first install (it is gated on the marker's
+            # imageVersion half, which is empty then). A failed hook fails the
+            # release -- biz.md section 8, step 9 -- so this is a deploy-time
+            # crash rather than a quietly automation-less pod.
+            #
+            # The same Secret the controlplane reads (deployment.yaml), never
+            # a second value minted here: n8n only ever has one owner
+            # account, and two generators would mean the controlplane holding
+            # a password n8n never accepted. secret-n8n.yaml carries why that
+            # Secret is legal under biz.md section 8 and why it is `lookup`ed
+            # rather than regenerated.
+            - name: N8N_OWNER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.n8nSecretName" . }}
+                  key: {{ include "agentos.n8nOwnerPasswordKey" . }}
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits: { cpu: 500m, memory: 512Mi }

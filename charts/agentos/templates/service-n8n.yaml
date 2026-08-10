@@ -1,0 +1,73 @@
+{{/*
+`agentos.n8nServiceName` is defined HERE rather than in `_helpers.tpl`
+(off-limits -- the same local-define convention secret.yaml uses for
+`agentos.bootstrapSecretName`) so job-provision.yaml builds `N8N_URL` from
+the SAME string this Service is named with. A near-miss between the two
+would render a DNS name that resolves to nothing, and the n8n seed's failure
+would look exactly like n8n being down.
+*/}}
+{{- define "agentos.n8nServiceName" -}}
+{{ include "agentos.fullname" . }}-n8n
+{{- end }}
+
+# The INTERNAL door onto n8n. `agentos-cli provision` really does dial n8n
+# over HTTP (`apps/agentos-cli/src/n8n/n8n-seed.service.ts` -- a plain
+# `fetch(config.n8n.url + path)`), and it is a Helm hook `kind: Job`, so it
+# runs in ITS OWN Pod: `localhost` there reaches the CLI container and never
+# the n8n container of the app Pod. A name on cluster DNS is the only thing
+# that can bridge those two Pods.
+#
+# THIS IS NOT A SECOND PUBLIC SURFACE, and service.yaml's header has been
+# corrected to say so rather than left contradicting this file. What makes
+# something public is the INGRESS, and templates/ingress.yaml names the
+# controlplane Service and nothing else; a ClusterIP has no address outside
+# the cluster to be reached at. The proof that biz.md agrees is already
+# installed by this very chart: postgresql, minio and qdrant each get a
+# ClusterIP Service from their own subcharts, biz.md section 5 still
+# describes those stores as "StatefulSets with no exposure at all", and
+# job-provision.yaml has always dialled `<release>-postgresql` and
+# `http://<release>-qdrant:6333` by Service name. "Exactly one component
+# listens" is a statement about the public door, not a ban on cluster DNS.
+#
+# A SEPARATE Service RATHER THAN A SECOND PORT ON service.yaml, deliberately:
+# the Ingress-facing Service keeps exactly one port, so "the Ingress points
+# at one Service, and that Service offers one thing" stays visible in the
+# manifest instead of being a property you have to reconstruct by reading
+# which of several ports the Ingress happened to name.
+#
+# `targetPort: n8n` BY NAME, NOT BY NUMBER, and that is load-bearing here.
+# The selector below is the pod selector every Pod this chart makes carries
+# -- including the provision Job's own Pod (job-provision.yaml copies
+# `selectorLabels` into its pod template). Resolving a NAMED port makes the
+# EndpointSlice controller skip any Pod with no container port of that name,
+# so the Job's Pod can never be enrolled as an endpoint for n8n and the seed
+# can never end up dialling itself.
+#
+# `publishNotReadyAddresses: true` IS REQUIRED, not a loosening. The app
+# Pod's readiness is the controlplane's `/healthz`, which answers 503 by
+# design until the provision marker exists (biz.md section 8: "not-ready
+# plus a loud log, never quietly serving a half-configured instance") -- and
+# the marker is written at the END of the very provision run that needs to
+# reach n8n. Without this field the Service would have zero ready endpoints
+# for exactly the window the seed runs in, and provisioning would deadlock
+# on its own readiness gate: connection refused, every time, on first
+# install. n8n's readiness is not what this Service is gating on; the
+# controlplane's is, and the two have nothing to do with each other.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agentos.n8nServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: n8n
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "agentos.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: n8n
+      port: {{ .Values.appPod.n8n.port }}
+      targetPort: n8n
+      protocol: TCP

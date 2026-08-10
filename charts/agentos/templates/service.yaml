@@ -1,11 +1,31 @@
 # The ONE public listener for this instance -- biz.md section 5: "Exactly
-# one component listens." n8n, OpenClaw and mcp-server-qdrant are reached
-# over `localhost` from inside this same pod (see deployment.yaml) and get a
-# `containerPort` there, never a Service of their own: a Service in front of
-# any of them would be a second public surface biz.md never sanctions.
+# one component listens." The Ingress (a separate template,
+# `.Values.ingress.*`) points at THIS Service and this Service alone, which
+# is what makes the controlplane the public door and everything else not.
 #
-# The Ingress (a separate template, `.Values.ingress.*`) points at THIS
-# Service and this Service alone.
+# CORRECTED: this header used to claim that n8n, OpenClaw and
+# mcp-server-qdrant "never [get] a Service of their own: a Service in front
+# of any of them would be a second public surface biz.md never sanctions."
+# That conflated a Service with exposure, and it is factually wrong. What
+# makes something public is the INGRESS -- a ClusterIP Service has no
+# address outside the cluster at all. The proof that biz.md agrees is
+# already installed by this chart: postgresql, minio and qdrant each get a
+# ClusterIP Service from their own subcharts, and biz.md section 5 still
+# describes those stores as "StatefulSets with no exposure at all", while
+# job-provision.yaml has always dialled `<release>-postgresql` and
+# `http://<release>-qdrant:6333` by Service name. "Exactly one component
+# listens" constrains what the Ingress may point at, not what may have a
+# name on cluster DNS.
+#
+# So n8n now has one: service-n8n.yaml, a separate ClusterIP Service, because
+# `agentos-cli provision` is a hook `kind: Job` running in its OWN Pod, where
+# `localhost` never reaches n8n. OpenClaw and mcp still get none,
+# and for OpenClaw that is not merely unnecessary but REQUIRED: its gateway
+# grants operator scope by connection locality, so the identical bytes
+# arriving over cluster DNS instead of loopback have every declared scope
+# wiped (see deployment.yaml's OPENCLAW_GATEWAY_URL comment). The rule that
+# actually holds is "only the controlplane is behind the Ingress", not "only
+# the controlplane may have a Service".
 apiVersion: v1
 kind: Service
 metadata:
