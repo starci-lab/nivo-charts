@@ -84,8 +84,8 @@ appPod:
     enabled: true
     port: 3100
     resources:
-      requests: { cpu: 100m, memory: 256Mi }
-      limits: { cpu: "1", memory: 1Gi }
+      requests: { cpu: 100m, memory: 192Mi }
+      limits: { cpu: "1", memory: 384Mi }
   controlplane:
     # The only container behind the INGRESS — biz.md section 5: "Exactly one
     # component listens". openclaw/n8n/mcp below are reached by the
@@ -96,13 +96,13 @@ appPod:
     # points only here.
     port: 3000
     resources:
-      requests: { cpu: 100m, memory: 256Mi }
-      limits: { cpu: "1", memory: 1Gi }
+      requests: { cpu: 100m, memory: 192Mi }
+      limits: { cpu: "1", memory: 384Mi }
   n8n:
     port: 5678
     resources:
-      requests: { cpu: 100m, memory: 512Mi }
-      limits: { cpu: "1", memory: 2Gi }
+      requests: { cpu: 100m, memory: 384Mi }
+      limits: { cpu: "1", memory: 768Mi }
   mcp:
     port: 8000
     # mcp-server-qdrant has no ordering guarantee against the qdrant
@@ -118,7 +118,12 @@ appPod:
       failureThreshold: 60
     resources:
       requests: { cpu: 50m, memory: 128Mi }
-      limits: { cpu: 500m, memory: 512Mi }
+      limits: { cpu: 500m, memory: 256Mi }
+
+namespace:
+  resources:
+    requestsMemory: 2Gi
+    limitsMemory: 4Gi
 
 # The ONE thing Helm carries that is credential-shaped, and it buys exactly
 # one call: `registerKey(publicKey)`. Single-use, short-lived, dead once
@@ -249,7 +254,7 @@ postgresql:
       size: 8Gi
     resources:
       requests: { cpu: 100m, memory: 256Mi }
-      limits: { cpu: "1", memory: 1Gi }
+      limits: { cpu: "1", memory: 384Mi }
     # Wipe gate — see top-level `persistence.deleteOnUninstall`. Native
     # Bitnami field, StatefulSet + volumeClaimTemplate, k8s 1.27+. A dev/e2e
     # overlay that sets `persistence.deleteOnUninstall: true` must flip BOTH
@@ -315,7 +320,7 @@ minio:
       helm.sh/resource-policy: keep
   resources:
     requests: { cpu: 100m, memory: 256Mi }
-    limits: { cpu: "1", memory: 1Gi }
+    limits: { cpu: "1", memory: 384Mi }
   image:
     registry: docker.io
     repository: bitnamilegacy/minio
@@ -365,8 +370,8 @@ qdrant:
     # (the safe default holds for free) and there is no lever here to opt
     # a dev/e2e teardown into deleting it.
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits: { cpu: "1", memory: 2Gi }
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
   # `image.tag: ""` on the official chart falls through to `appVersion`,
   # which is fixed by the DEPENDENCY VERSION pin in Chart.yaml — leave it
   # blank rather than duplicating the version in two places that can drift.

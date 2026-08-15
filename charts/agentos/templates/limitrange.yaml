@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ include "agentos.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 25m
+        memory: 64Mi
+      default:
+        cpu: 500m
+        memory: 512Mi

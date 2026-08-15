@@ -233,6 +233,9 @@ spec:
             - name: KEYCLOAK_REALM
               value: {{ dig "keycloak" "realm" "nivo" $vals | quote }}
             {{- end }}
+          envFrom:
+            - secretRef:
+                name: app-secrets
           resources:
             {{- toYaml .Values.appPod.controlplane.resources | nindent 12 }}
           # THE ONLY readinessProbe IN THIS POD, on purpose. A readinessProbe
@@ -246,7 +249,12 @@ spec:
           # supposed to mean here.
           readinessProbe:
             httpGet:
-              path: /healthz
+              # Helm runs post-install hooks only after --wait sees the
+              # Deployment ready. The provision marker is written by that
+              # hook, so probing marker-aware /healthz here deadlocks the
+              # release. This probe owns process readiness; the hook and
+              # provisioning saga own product readiness.
+              path: /healthz/live
               port: controlplane
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -263,6 +271,11 @@ spec:
               port: controlplane
             initialDelaySeconds: 10
             periodSeconds: 15
+          startupProbe:
+            tcpSocket:
+              port: controlplane
+            periodSeconds: 5
+            failureThreshold: 60
 
         {{- if .Values.appPod.openclaw.enabled }}
         # ---------------------------------------------------------------
@@ -273,6 +286,18 @@ spec:
         - name: openclaw
           image: {{ include "agentos.appImage" (dict "root" $ "img" .Values.image.openclaw) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - node
+            - openclaw.mjs
+            - gateway
+            - --allow-unconfigured
+            - --bind
+            - lan
+            - --auth
+            - token
+          envFrom:
+            - secretRef:
+                name: app-secrets
           ports:
             # 18789 is HARDCODED, not `.Values.appPod.openclaw.port` -- this
             # is the port docs/OPENCLAW-GATEWAY-PROTOCOL.md measured against
@@ -392,6 +417,8 @@ spec:
               value: {{ printf "http://%s-qdrant:6333" .Release.Name | quote }}
             - name: COLLECTION_NAME
               value: {{ dig "mcp" "collectionName" "knowledge" $vals | quote }}
+            - name: FASTMCP_SERVER_HOST
+              value: "0.0.0.0"
           resources:
             {{- toYaml .Values.appPod.mcp.resources | nindent 12 }}
           # NO ORDERING GUARANTEE against the qdrant StatefulSet below --

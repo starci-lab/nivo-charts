@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "agentos.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.memory: {{ .Values.namespace.resources.requestsMemory | quote }}
+    limits.memory: {{ .Values.namespace.resources.limitsMemory | quote }}
