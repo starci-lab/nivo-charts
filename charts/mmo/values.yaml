@@ -1,0 +1,85 @@
+# MMO is intentionally a generic workload chart. Concrete images, ports,
+# domains, credentials and tenant policy are deployment inputs; they are not
+# inferred from another Nivo product.
+
+replicaCount: 1
+
+image:
+  # Required. Supply both values when linting, rendering or installing.
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+command: []
+args: []
+env: []
+envFrom: []
+
+service:
+  type: ClusterIP
+  # Required. This port is used by both the Service and the container.
+  port: null
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Required only when ingress is enabled.
+  host: ""
+  path: /
+  pathType: Prefix
+  tls: []
+
+# Each probe accepts a native Kubernetes Probe object. Leave it empty to omit
+# that probe instead of guessing an MMO health endpoint.
+probes:
+  liveness: {}
+  readiness: {}
+  startup: {}
+
+persistence:
+  enabled: false
+  # Set an existing claim to mount it without creating a PVC.
+  existingClaim: ""
+  mountPath: /data
+  size: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  storageClass: ""
+  annotations: {}
+
+resources: {}
+
+additionalVolumeMounts: []
+additionalVolumes: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
