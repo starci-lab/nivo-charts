@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+apiVersion: v2
+name: mmo
+description: Generic, artifact-only MMO workload chart for Nivo
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mmo
+  - nivo
+maintainers:
+  - name: starci183
+    url: "https://x.com/0xstacynguyen"
+annotations:
+  category: Application
+  licenses: MIT
