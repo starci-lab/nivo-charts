@@ -1,9 +1,9 @@
 name: helm-validate-and-publish
 
 # Mirrors starci-lab/kani-k8s's helm-validate-and-publish.yml, extended from
-# one chart to a matrix of two: charts/agentos and charts/expert-academy.
-# Each chart validates independently — a broken expert-academy chart must
-# never block an agentos release, and vice versa.
+# one chart to a matrix covering every package owned by this repository.
+# Each chart validates independently so a broken package is attributed to
+# its own matrix entry.
 
 on:
   pull_request:
@@ -37,7 +37,7 @@ jobs:
   validate:
     strategy:
       matrix:
-        chart: [agentos, expert-academy]
+        chart: [agentos, expert-academy, mmo]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -67,22 +67,38 @@ jobs:
         run: helm dependency build "charts/${{ matrix.chart }}"
 
       - name: Helm lint
-        run: helm lint "charts/${{ matrix.chart }}"
+        run: |
+          if [ "${{ matrix.chart }}" = "mmo" ]; then
+            helm lint "charts/${{ matrix.chart }}" \
+              --set image.repository=ghcr.io/example/mmo \
+              --set image.tag=ci-smoke-test \
+              --set service.port=8080
+          else
+            helm lint "charts/${{ matrix.chart }}"
+          fi
 
       - name: Helm template (smoke test)
         run: |
-          helm template test "charts/${{ matrix.chart }}" \
-            --set bootstrap.token=ci-smoke-test \
-            --set instance.id=ci-smoke-test \
-            --set instance.name=ci-smoke-test \
-            > /dev/null
+          if [ "${{ matrix.chart }}" = "mmo" ]; then
+            helm template test "charts/${{ matrix.chart }}" \
+              --set image.repository=ghcr.io/example/mmo \
+              --set image.tag=ci-smoke-test \
+              --set service.port=8080 \
+              > /dev/null
+          else
+            helm template test "charts/${{ matrix.chart }}" \
+              --set bootstrap.token=ci-smoke-test \
+              --set instance.id=ci-smoke-test \
+              --set instance.name=ci-smoke-test \
+              > /dev/null
+          fi
 
   build:
     needs: validate
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     strategy:
       matrix:
-        chart: [agentos, expert-academy]
+        chart: [agentos, expert-academy, mmo]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
