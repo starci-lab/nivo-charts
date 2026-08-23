@@ -2,8 +2,8 @@ name: helm-validate-and-publish
 
 # Mirrors starci-lab/kani-k8s's helm-validate-and-publish.yml, extended from
 # one chart to a matrix covering every package owned by this repository.
-# Each chart validates independently so a broken package is attributed to
-# its own matrix entry.
+# Each chart validates independently with representative, non-secret smoke
+# values so a broken package is attributed to its own matrix entry.
 
 on:
   pull_request:
@@ -37,7 +37,22 @@ jobs:
   validate:
     strategy:
       matrix:
-        chart: [agentos, expert-academy, mmo]
+        include:
+          - chart: agentos
+            smoke_args: >-
+              --set-string bootstrap.token=ci-smoke-test
+              --set-string instance.id=ci-smoke-test
+              --set-string instance.name=ci-smoke-test
+          - chart: expert-academy
+            smoke_args: >-
+              --set-string bootstrap.token=ci-smoke-test
+              --set-string instance.id=ci-smoke-test
+              --set-string instance.name=ci-smoke-test
+          - chart: mmo
+            smoke_args: >-
+              --set-string image.repository=example.invalid/nivo/mmo
+              --set-string image.tag=ci-smoke-test
+              --set service.port=8080
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -67,31 +82,13 @@ jobs:
         run: helm dependency build "charts/${{ matrix.chart }}"
 
       - name: Helm lint
-        run: |
-          if [ "${{ matrix.chart }}" = "mmo" ]; then
-            helm lint "charts/${{ matrix.chart }}" \
-              --set image.repository=ghcr.io/example/mmo \
-              --set image.tag=ci-smoke-test \
-              --set service.port=8080
-          else
-            helm lint "charts/${{ matrix.chart }}"
-          fi
+        run: helm lint "charts/${{ matrix.chart }}" ${{ matrix.smoke_args }}
 
       - name: Helm template (smoke test)
         run: |
-          if [ "${{ matrix.chart }}" = "mmo" ]; then
-            helm template test "charts/${{ matrix.chart }}" \
-              --set image.repository=ghcr.io/example/mmo \
-              --set image.tag=ci-smoke-test \
-              --set service.port=8080 \
-              > /dev/null
-          else
-            helm template test "charts/${{ matrix.chart }}" \
-              --set bootstrap.token=ci-smoke-test \
-              --set instance.id=ci-smoke-test \
-              --set instance.name=ci-smoke-test \
-              > /dev/null
-          fi
+          helm template test "charts/${{ matrix.chart }}" \
+            ${{ matrix.smoke_args }} \
+            > /dev/null
 
   build:
     needs: validate
@@ -158,10 +155,10 @@ jobs:
           merge-multiple: true
 
       - name: Generate index.yaml
-        # ONE index for BOTH charts — `helm repo index` merges by chart name,
-        # so re-running it here over both packages is safe and is what lets
+        # ONE index for ALL charts — `helm repo index` merges by chart name,
+        # so re-running it here over every package is safe and is what lets
         # `helm repo add nivo-charts https://<owner>.github.io/<repo>/charts`
-        # serve both from a single repo URL.
+        # serve every chart from a single repo URL.
         run: |
           BASE_URL="https://${CHARTS_DOMAIN}/charts"
 
