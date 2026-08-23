@@ -5,8 +5,8 @@ description: >-
   One AgentOS instance — the customer's OpenClaw agent plus n8n, with the
   controlplane as the single listening component. One Helm release per
   customer (biz.md section 1). The app pod is a single Deployment
-  (controlplane + openclaw + n8n + mcp); postgresql, minio and qdrant are
-  separate stateful workloads pulled in as subcharts below.
+  (controlplane + openclaw + n8n); postgresql, minio and qdrant are separate
+  stateful workloads, and the controlplane serves the MCP boundary.
 type: application
 home: N/A
 icon: https://r2.kanibot.xyz/kani.png
@@ -34,7 +34,7 @@ annotations:
 # the normal state for hours, which is why `instances.chart_version` and
 # `instances.image_versions` are tracked per instance rather than assumed
 # equal.
-version: 0.1.0
+version: 0.1.1
 appVersion: "0.1.0"
 
 # Every dependency version is a TILDE RANGE PINNED AT THE PATCH LEVEL

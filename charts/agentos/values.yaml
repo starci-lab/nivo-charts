@@ -54,11 +54,6 @@ image:
   n8n:
     repository: docker.n8n.io/n8nio/n8n
     tag: "1.64.3"
-  mcp:
-    # mcp-server-qdrant — talks the Model Context Protocol, gives the
-    # controlplane/OpenClaw a tool interface onto this instance's own Qdrant.
-    repository: mcp/qdrant
-    tag: "latest"
   # The one image every Job and hook in this chart runs — `nivo-cli`
   # (biz.md section 5): one image, every subcommand. Kept separate from
   # `controlplane` because the hook and Jobs below reference it by name.
@@ -83,6 +78,7 @@ appPod:
   openclaw:
     enabled: true
     port: 3100
+    controlUiBasePath: /openclaw
     resources:
       requests: { cpu: 100m, memory: 192Mi }
       limits: { cpu: "1", memory: 384Mi }
@@ -103,22 +99,6 @@ appPod:
     resources:
       requests: { cpu: 100m, memory: 384Mi }
       limits: { cpu: "1", memory: 768Mi }
-  mcp:
-    port: 8000
-    # mcp-server-qdrant has no ordering guarantee against the qdrant
-    # subchart below — containers in one pod start together, and only
-    # initContainers enforce order, which biz.md section 5 rules out for
-    # this pod ("no sidecar and no initContainer"). So MCP waits by
-    # RETRYING its own connection instead of the pod blocking on one: a
-    # generous `startupProbe` (high `failureThreshold` at a short period)
-    # gives it room to keep dialing Qdrant without an init stage delaying
-    # controlplane/openclaw/n8n, which have nothing to wait for.
-    startupProbe:
-      periodSeconds: 5
-      failureThreshold: 60
-    resources:
-      requests: { cpu: 50m, memory: 128Mi }
-      limits: { cpu: 500m, memory: 256Mi }
 
 namespace:
   resources:
@@ -143,17 +123,18 @@ bootstrap:
 # routing decision, not a second Ingress.
 ingress:
   enabled: true
-  className: nginx
+  # Tino workers run the k3s-bundled Traefik controller.
+  className: traefik
   # Falls back to `<instance.name>.<instance.baseDomain>` when blank — see
   # `agentos.hostname` in _helpers.tpl. Set explicitly only to override that
   # derivation.
   host: ""
-  annotations: {}
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
   tls:
-    # A wildcard certificate at `*.<baseDomain>` is the whole point (biz.md
-    # section 5: "no per-instance ACME") — this toggle just wires an
-    # already-issued secret into the Ingress, it never requests one.
-    enabled: false
+    # cert-manager issues the public certificate into `<release>-tls` when
+    # no shared wildcard secret is supplied.
+    enabled: true
     secretName: ""
 
 # `agentos-cli provision` as a Helm `post-install`/`post-upgrade` hook Job —

@@ -57,6 +57,14 @@ spec:
         {{- include "agentos.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "agentos.serviceAccountName" . }}
+      # Tino nodes inherit a wildcard search domain. With Kubernetes' default
+      # ndots:5, public names such as api.example.com are tried under that
+      # search domain first and can resolve to the wrong host. Treat ordinary
+      # multi-label names as absolute before applying search suffixes.
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -95,6 +103,12 @@ spec:
               value: {{ .Chart.AppVersion | quote }}
             - name: NIVO_HOSTNAME
               value: {{ include "agentos.hostname" . | quote }}
+            - name: NIVO_POD_ID
+              value: {{ .Values.instance.id | quote }}
+            - name: NIVO_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: NIVO_BACKEND_URL
               value: {{ .Values.bootstrap.backendUrl | quote }}
             # THE ONE CREDENTIAL THIS CHART CARRIES. Single-use, buys exactly
@@ -145,6 +159,25 @@ spec:
             # empty).
             - name: OPENCLAW_GATEWAY_URL
               value: "ws://127.0.0.1:18789"
+            - name: OPENCLAW_CONFIG_DIR
+              value: "/var/lib/nivo/openclaw"
+            - name: OPENCLAW_PUBLIC_ORIGIN
+              value: {{ printf "https://%s" (include "agentos.hostname" .) | quote }}
+            - name: OPENCLAW_CONTROL_UI_BASE_PATH
+              value: {{ .Values.appPod.openclaw.controlUiBasePath | quote }}
+            - name: OPENCLAW_GATEWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.openclawSecretName" . }}
+                  key: gateway-password
+            # Explicit env wins over any legacy value still present in app-secrets.
+            - name: OPENCLAW_GATEWAY_TOKEN
+              value: ""
+            - name: OPENCLAW_LAUNCH_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.openclawSecretName" . }}
+                  key: launch-cookie-secret
             - name: OPENCLAW_ENABLED
               value: {{ .Values.appPod.openclaw.enabled | quote }}
             # Loopback here and a Service DNS name in job-provision.yaml is
@@ -168,8 +201,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "agentos.n8nSecretName" . }}
                   key: {{ include "agentos.n8nOwnerPasswordKey" . }}
-            - name: MCP_URL
-              value: {{ printf "http://127.0.0.1:%d" (int .Values.appPod.mcp.port) | quote }}
             # --- stores: hostnames follow the subcharts' own default
             # fullname convention (`<release-name>-<chart-name>`), which
             # holds as long as nobody sets a `nameOverride`/`fullnameOverride`
@@ -236,6 +267,10 @@ spec:
           envFrom:
             - secretRef:
                 name: app-secrets
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/nivo/openclaw
+              subPath: openclaw
           resources:
             {{- toYaml .Values.appPod.controlplane.resources | nindent 12 }}
           # THE ONLY readinessProbe IN THIS POD, on purpose. A readinessProbe
@@ -286,15 +321,28 @@ spec:
         - name: openclaw
           image: {{ include "agentos.appImage" (dict "root" $ "img" .Values.image.openclaw) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
           args:
-            - node
-            - openclaw.mjs
-            - gateway
-            - --allow-unconfigured
-            - --bind
-            - lan
-            - --auth
-            - token
+            - |
+              tries=0
+              until [ "$(cat /home/node/.openclaw/.nivo-openclaw-access-ready 2>/dev/null || true)" = "$NIVO_POD_UID" ]; do
+                tries=$((tries + 1))
+                [ "$tries" -lt 120 ] || exit 1
+                sleep 1
+              done
+              exec node openclaw.mjs gateway --bind lan
+          env:
+            - name: NIVO_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: OPENCLAW_GATEWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.openclawSecretName" . }}
+                  key: gateway-password
+            - name: OPENCLAW_GATEWAY_TOKEN
+              value: ""
           envFrom:
             - secretRef:
                 name: app-secrets
@@ -400,46 +448,3 @@ spec:
               port: n8n
             initialDelaySeconds: 20
             periodSeconds: 20
-
-        # ---------------------------------------------------------------
-        # mcp -- mcp-server-qdrant, a tool interface onto THIS instance's
-        # own Qdrant for the controlplane/OpenClaw to call.
-        # ---------------------------------------------------------------
-        - name: mcp
-          image: {{ include "agentos.appImage" (dict "root" $ "img" .Values.image.mcp) }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          ports:
-            - name: mcp
-              containerPort: {{ .Values.appPod.mcp.port }}
-              protocol: TCP
-          env:
-            - name: QDRANT_URL
-              value: {{ printf "http://%s-qdrant:6333" .Release.Name | quote }}
-            - name: COLLECTION_NAME
-              value: {{ dig "mcp" "collectionName" "knowledge" $vals | quote }}
-            - name: FASTMCP_SERVER_HOST
-              value: "0.0.0.0"
-          resources:
-            {{- toYaml .Values.appPod.mcp.resources | nindent 12 }}
-          # NO ORDERING GUARANTEE against the qdrant StatefulSet below --
-          # containers in one Pod start together, and only initContainers
-          # enforce order, which biz.md section 5 rules out for this pod
-          # ("no sidecar and no initContainer"). So MCP is expected to WAIT
-          # BY RETRYING ITS OWN CONNECTION rather than the pod blocking on
-          # one; this startupProbe only keeps k8s from restart-looping the
-          # container while it does that -- it does not itself verify Qdrant
-          # is reachable, only that the process is up and listening.
-          # `appPod.mcp.startupProbe` (values.yaml) sets a high
-          # `failureThreshold` at a short `periodSeconds` for exactly this
-          # reason. Leaving this unhandled is what turns a slow Qdrant into
-          # a `CrashLoopBackOff` that reads like a broken chart.
-          startupProbe:
-            tcpSocket:
-              port: mcp
-            periodSeconds: {{ .Values.appPod.mcp.startupProbe.periodSeconds }}
-            failureThreshold: {{ .Values.appPod.mcp.startupProbe.failureThreshold }}
-          # No readinessProbe -- see the controlplane container's comment.
-          livenessProbe:
-            tcpSocket:
-              port: mcp
-            periodSeconds: 30

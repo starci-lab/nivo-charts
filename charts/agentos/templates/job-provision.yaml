@@ -58,6 +58,10 @@ spec:
         app.kubernetes.io/component: provision
     spec:
       restartPolicy: Never
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -168,13 +172,12 @@ spec:
             # answer from the knowledge base, and every log line still reads
             # healthy.
             #
-            # The `/mcp` suffix is mcp-server-qdrant's streamable-http
-            # endpoint. It is deliberately absent from `MCP_URL` in
-            # deployment.yaml, which the controlplane joins its own path onto:
-            # the two env vars name the same server and are not
-            # interchangeable.
+            # The controlplane owns the streamable-HTTP `/mcp` endpoint and
+            # reads this instance's Qdrant directly. There is deliberately no
+            # second mcp-server-qdrant container: two tool servers over one
+            # collection would create competing authorization contracts.
             - name: KNOWLEDGE_MCP_URL
-              value: {{ printf "http://127.0.0.1:%d/mcp" (.Values.appPod.mcp.port | int) | quote }}
+              value: {{ printf "http://127.0.0.1:%d/mcp" (.Values.appPod.controlplane.port | int) | quote }}
 
             # -- n8n ------------------------------------------------------
             # A CLUSTER DNS NAME, NOT `localhost` -- and the contrast with

@@ -41,7 +41,7 @@ data:
   # bootstrap token in the Secret alongside this file.
   BACKEND_URL: {{ .Values.bootstrap.backendUrl | quote }}
 
-  # The one listener's own port, and the three internal containers'
+  # The one listener's own port and the internal containers'
   # `containerPort`s it reaches over localhost (biz.md section 5 — "they
   # share `localhost`"). Present here (rather than hardcoded in the
   # Deployment) so a values.yaml port change never drifts from what the
@@ -51,7 +51,6 @@ data:
   OPENCLAW_PORT: {{ .Values.appPod.openclaw.port | quote }}
   {{- end }}
   N8N_PORT: {{ .Values.appPod.n8n.port | quote }}
-  MCP_PORT: {{ .Values.appPod.mcp.port | quote }}
 
   {{- if .Values.postgresql.enabled }}
 
