@@ -176,8 +176,10 @@ backup:
   schedule: "0 3 * * *"
 
 # RBAC for the controlplane's own Job-spawning (index-pending,
-# sync-knowledge). It needs `create`/`get`/`list`/`delete` on `jobs` in ITS
-# OWN namespace and nothing else: RBAC to run arbitrary images on the
+# sync-knowledge). It needs `create`/`get`/`list`/`delete` on `jobs`, plus
+# read-only `list pods` and `get pods/log` so it can collect the terminal CLI
+# result from the Job-owned Pod, all in ITS OWN namespace and nothing else:
+# RBAC to run arbitrary images on the
 # internet-facing component is a privilege escalation on top of compromising
 # it — "run any image here" would additionally buy persistence in the cluster
 # (biz.md section 5, rule 4). The Job's pod spec itself is pinned to the

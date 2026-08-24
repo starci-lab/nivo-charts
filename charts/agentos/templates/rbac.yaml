@@ -1,16 +1,18 @@
 # The controlplane's OWN Job-spawning RBAC (biz.md section 5, "Jobs -- how
 # heavy work runs", rule 4) -- nothing more.
 #
-# WHY create/get/list/delete AND NOTHING ELSE. `JobSpawnerService`
+# WHY THESE VERBS AND NOTHING ELSE. `JobSpawnerService`
 # (apps/agentos-controlplane/src/jobs/job-spawner.service.ts) calls
 # `createNamespacedJob` to spawn `index-pending`/`sync-knowledge`, relying on
 # k8s's own 409 Conflict as the lock (biz.md's "the Job's fixed name IS the
 # lock") rather than a separate lease read -- so `create` is the verb actually
-# exercised today, and `get`/`list` are added for the job-status surfacing a
-# health check or the panel will need next. `delete` releases the SAME
+# exercised today, and `get`/`list` read the terminal status. `delete` releases the SAME
 # fixed-name lock only after Kubernetes has recorded that Job as terminal;
-# the Job also retains a five-minute TTL as bounded operational evidence.
-# There is still no `update`, `patch`, pod access or second resource here.
+# the Job also retains a five-minute TTL as bounded operational evidence. A
+# successful Job's result is deliberately emitted on its final stdout line,
+# so the controlplane additionally needs read-only `list` on Pods to find the
+# Job-owned Pod and `get` on `pods/log` to collect that line. It cannot create,
+# update, patch, delete, exec into, attach to, or port-forward a Pod.
 #
 # This is the whole point of rule 4: job-creation RBAC on the component that
 # terminates public traffic is a privilege escalation ON TOP OF compromising
@@ -51,6 +53,12 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
