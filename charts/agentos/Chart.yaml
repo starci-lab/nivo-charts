@@ -34,7 +34,7 @@ annotations:
 # the normal state for hours, which is why `instances.chart_version` and
 # `instances.image_versions` are tracked per instance rather than assumed
 # equal.
-version: 0.1.1
+version: 0.1.2
 appVersion: "0.1.0"
 
 # Every dependency version is a TILDE RANGE PINNED AT THE PATCH LEVEL

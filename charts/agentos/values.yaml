@@ -61,6 +61,21 @@ image:
     repository: nivo/agentos-cli
     tag: "0.1.0"
 
+# Private, namespace-local malware scanner for uploaded module documents.
+# The central object is a quarantine/backup copy; only the verified workspace
+# replica reaches this scanner and then Qdrant. No Service or Ingress exposes
+# clamd outside the workspace namespace.
+clamav:
+  enabled: true
+  image:
+    repository: clamav/clamav
+    tag: stable_base
+    pullPolicy: IfNotPresent
+  port: 3310
+  resources:
+    requests: { cpu: 100m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1536Mi }
+
 # The single app pod. `replicas: 1` is not a tuning knob — it is a
 # Deployment (not a bare Pod) purely for RESCHEDULING when a node is lost,
 # never for horizontal scale: OpenClaw holds channel sessions, so a second
