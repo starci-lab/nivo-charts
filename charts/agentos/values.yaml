@@ -73,8 +73,8 @@ clamav:
     pullPolicy: IfNotPresent
   port: 3310
   resources:
-    requests: { cpu: 100m, memory: 512Mi }
-    limits: { cpu: "1", memory: 1536Mi }
+    requests: { cpu: 100m, memory: 384Mi }
+    limits: { cpu: "1", memory: 1Gi }
 
 # The single app pod. `replicas: 1` is not a tuning knob — it is a
 # Deployment (not a bare Pod) purely for RESCHEDULING when a node is lost,
