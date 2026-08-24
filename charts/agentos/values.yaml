@@ -118,7 +118,10 @@ appPod:
 namespace:
   resources:
     requestsMemory: 2Gi
-    limitsMemory: 4Gi
+    # App/stores use 2816Mi of limits. Scanner plus the provision and
+    # ingestion Jobs can overlap briefly, so 4Gi deadlocks valid work.
+    # A 6Gi namespace still stays below the two-node 8Gi capacity envelope.
+    limitsMemory: 6Gi
 
 # The ONE thing Helm carries that is credential-shaped, and it buys exactly
 # one call: `registerKey(publicKey)`. Single-use, short-lived, dead once
