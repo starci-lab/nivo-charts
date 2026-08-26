@@ -37,6 +37,12 @@ spec:
             - name: clamd
               containerPort: {{ .Values.clamav.port }}
               protocol: TCP
+          env:
+            - name: CLAMD_CONF_ConcurrentDatabaseReload
+              value: {{ ternary "yes" "no" .Values.clamav.concurrentDatabaseReload | quote }}
+          volumeMounts:
+            - name: clamav-database
+              mountPath: /var/lib/clamav
           startupProbe:
             tcpSocket:
               port: clamd
@@ -55,6 +61,12 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.clamav.resources | nindent 12 }}
+      volumes:
+        # Keep downloaded signatures across container restarts in the same pod.
+        # Without this, every OOM recovery redownloads the database and repeats
+        # the same page-cache + clamd startup memory spike forever.
+        - name: clamav-database
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
